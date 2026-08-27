@@ -1,0 +1,39 @@
+# Python/runtime
+__pycache__/
+*.py[cod]
+venv/
+.agents/
+.claude/
+.codex/
+
+# Node/runtime
+node_modules/
+
+# Scanner captures and generated outputs
+caps/
+calib/
+focus/
+data/captures/
+data/calibration/
+data/focus/
+debug/
+debug_gray_local/
+output/
+sample_data/
+sweep/
+temp/
+
+# Generated point clouds and roughness/debug artifacts
+*.ply
+*.npz
+*.gif
+*.png
+target_scan*.png
+test_cloud*.png
+
+# Projector build outputs and local generated files
+projector/build/
+projector/__pycache__/
+
+# Generated pattern/print assets
+imgs/
