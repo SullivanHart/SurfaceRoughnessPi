@@ -7,7 +7,6 @@ Tools are grouped by whether they are part of normal scanner operation.
 `tools/runtime/` is called by `scan.py` after every successful scan.
 
 - `reconstruct_local_gray.py` - decodes the captured Gray-code sequence and writes the point cloud.
-- `roughness_from_ply.py` - computes roughness metrics from the reconstructed point cloud.
 
 ## Calibration
 

@@ -215,6 +215,44 @@ def run_command(label, command):
         raise RuntimeError(f"{label} failed with exit code {result.returncode}")
 
 
+def run_roughness_analysis():
+    try:
+        from svr_roughness import RoughnessConfig, analyze_file, format_report
+    except ImportError as exc:
+        raise RuntimeError(
+            "svr-roughness is not installed. Run: "
+            "venv/bin/python -m pip install ../svr-roughness"
+        ) from exc
+
+    print("\n=== Surface roughness analysis ===")
+    ply_path = project_path(args.recon_out)
+    print(
+        "svr_roughness.analyze_file "
+        f"{ply_path} "
+        f"--grid-mm {args.roughness_grid_mm} "
+        f"--short-cutoff-mm {args.roughness_short_cutoff_mm} "
+        f"--long-cutoff-mm {args.roughness_long_cutoff_mm}"
+    )
+    result = analyze_file(
+        ply_path,
+        RoughnessConfig(
+            grid_mm=args.roughness_grid_mm,
+            short_cutoff_mm=args.roughness_short_cutoff_mm,
+            long_cutoff_mm=args.roughness_long_cutoff_mm,
+        ),
+    )
+    print(format_report(result))
+
+    if args.roughness_save_grid:
+        grid_path = project_path(args.roughness_save_grid)
+        result.save_grid_npz(grid_path)
+        print(f"\nWrote grid data: {grid_path}")
+    if args.roughness_metrics_out:
+        metrics_path = project_path(args.roughness_metrics_out)
+        result.save_metrics_json(metrics_path)
+        print(f"Wrote metrics: {metrics_path}")
+
+
 def ensure_projector_scan():
     if args.legacy16:
         proj.start_scan16()
@@ -461,24 +499,8 @@ def run_postprocess():
     send_status("RECONSTRUCTING")
     run_command("Reconstructing point cloud", recon_cmd)
 
-    rough_cmd = [
-        sys.executable,
-        str(TOOLS_DIR / "runtime" / "roughness_from_ply.py"),
-        str(project_path(args.recon_out)),
-        "--grid-mm",
-        str(args.roughness_grid_mm),
-        "--short-cutoff-mm",
-        str(args.roughness_short_cutoff_mm),
-        "--long-cutoff-mm",
-        str(args.roughness_long_cutoff_mm),
-    ]
-    if args.roughness_save_grid:
-        rough_cmd.extend(["--save-grid", str(project_path(args.roughness_save_grid))])
-    if args.roughness_metrics_out:
-        rough_cmd.extend(["--metrics-out", str(project_path(args.roughness_metrics_out))])
-
     send_status("ROUGHNESS")
-    run_command("Surface roughness analysis", rough_cmd)
+    run_roughness_analysis()
     if args.roughness_metrics_out:
         send_result(project_path(args.roughness_metrics_out))
 

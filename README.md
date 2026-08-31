@@ -6,7 +6,7 @@ This directory is organized so the Pi can run the scanner from one stable entry 
 ./run_scan.sh
 ```
 
-`scan.py` waits for the serial trigger, captures the flashed DLP4500 pattern sequence, reconstructs a point cloud, and runs the surface roughness calculation.
+`scan.py` waits for the serial trigger, captures the flashed DLP4500 pattern sequence, reconstructs a point cloud, and runs the surface roughness calculation through `svr_roughness.analyze_file()` from the pip-installable `svr-roughness` package.
 
 ## Runtime Layout
 
@@ -21,13 +21,13 @@ This directory is organized so the Pi can run the scanner from one stable entry 
 - `output/pointclouds/` - reconstructed `.ply` files.
 - `output/roughness/` - roughness grids and saved analysis data.
 - `output/presentation/` - presentation images/GIFs.
-- `tools/runtime/` - reconstruction and roughness code called by `scan.py`.
+- `tools/runtime/` - reconstruction code called by `scan.py`.
 - `tools/calibration/` - user-run calibration and calibration verification tools.
 - `tools/development/` - diagnostics and development helpers.
 - `tools/presentation/` - point-cloud rendering tools for slides/reports.
 - `imgs/graycode_456x570_scaled_to_912x1140/` - current DLP4500 flash image set.
 
-The normal runtime source is `scan.py`, `projector/`, `arduino/`, and `tools/runtime/`. Everything under `tools/development/` or `tools/presentation/` is optional support tooling.
+The normal runtime source is `scan.py`, `projector/`, `arduino/`, `tools/runtime/`, and the installed `svr-roughness` package. Everything under `tools/development/` or `tools/presentation/` is optional support tooling.
 
 ## Current Scan Defaults
 
@@ -59,11 +59,13 @@ Run reconstruction manually on the latest capture:
 venv/bin/python tools/runtime/reconstruct_local_gray.py
 ```
 
-Run roughness manually:
+Install or refresh the shared roughness library during Pi setup:
 
 ```bash
-venv/bin/python tools/runtime/roughness_from_ply.py output/pointclouds/latest.ply
+venv/bin/python -m pip install ../svr-roughness
 ```
+
+`scan.py` imports `svr_roughness.analyze_file()` directly during post-processing; roughness is no longer executed through a subprocess.
 
 Recalibrate with the 10 x 7 ChArUco board:
 

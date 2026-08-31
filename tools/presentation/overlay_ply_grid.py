@@ -2,7 +2,7 @@
 Overlay a measurement grid and/or roughness height map onto an ASCII PLY.
 
 The scale grid is computed in the best-fit plane of the cloud. If a roughness
-.npz grid from roughness_from_ply.py is supplied, each point is projected into
+.npz grid from svr-roughness is supplied, each point is projected into
 that saved fitted-plane coordinate system and recolored by the corresponding
 plane-removed height residual.
 """
@@ -38,7 +38,7 @@ def parse_args():
     parser.add_argument("--darken", type=float, default=0.55,
                         help="Darken non-grid colors by this multiplier; 1 keeps original brightness")
     parser.add_argument("--roughness-grid", default=None,
-                        help=".npz grid written by roughness_from_ply.py --save-grid")
+                        help=".npz grid written by svr-roughness save_grid_npz()")
     parser.add_argument("--roughness-field", choices=("grid_filtered", "grid_filled", "grid_raw"),
                         default="grid_filtered")
     parser.add_argument("--roughness-valid", choices=("valid_filled", "valid_raw"),
