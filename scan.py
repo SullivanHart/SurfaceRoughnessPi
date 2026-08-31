@@ -586,11 +586,17 @@ def run_scan():
 
     if scan_in_progress:
         print("Scan ignored: already running")
+        send_status("SCANNING")
         return
 
     if now_s() - last_scan_end < SCAN_COOLDOWN_S:
         print("Scan ignored: cooldown")
         return
+
+    if camera_left is None or camera_right is None or not camera_left.IsOpen() or not camera_right.IsOpen() or camera_left.IsCameraDeviceRemoved() or camera_right.IsCameraDeviceRemoved():
+        print("Scan aborted: camera missing or disconnected")
+        send_status("WAIT_CAMERAS")
+        raise RuntimeError("Camera missing or disconnected at scan start")
 
     send_status("SCANNING")
     scan_in_progress = True
@@ -607,8 +613,13 @@ def run_scan():
         flush_stale_frames(camera_right, "RIGHT")
 
         saved_count = 0
+        consecutive_failures = 0
 
         for slot_idx in range(PROJECTOR_SLOT_COUNT):
+            if camera_left.IsCameraDeviceRemoved() or camera_right.IsCameraDeviceRemoved():
+                send_status("CAMERA_ERR")
+                raise RuntimeError(f"Camera disconnected during scan at slot {slot_idx:02d}")
+
             save_idx = CAPTURE_BY_SLOT.get(slot_idx)
             if save_idx is None:
                 print(f"\nSlot {slot_idx:02d} (skip)")
@@ -640,16 +651,22 @@ def run_scan():
                 )
 
             except Exception as e:
-                print(f"  TIMEOUT slot {slot_idx:02d}: {e}")
+                consecutive_failures += 1
+                print(f"  TIMEOUT slot {slot_idx:02d} (failure {consecutive_failures}/3): {e}")
                 print(
                     "  After timeout:",
                     "L=", get_line1_status(camera_left),
                     "R=", get_line1_status(camera_right)
                 )
+                if camera_left.IsCameraDeviceRemoved() or camera_right.IsCameraDeviceRemoved() or consecutive_failures >= 3:
+                    send_status("CAMERA_ERR")
+                    raise RuntimeError(f"Aborting scan due to camera disconnection / repeated timeouts at slot {slot_idx:02d}") from e
+
                 time.sleep(INTER_PATTERN_DELAY_S)
                 continue
 
             if grab_left.GrabSucceeded() and grab_right.GrabSucceeded():
+                consecutive_failures = 0
                 if save_idx is not None:
                     img_left = converter_left.Convert(grab_left).GetArray()
                     img_right = converter_right.Convert(grab_right).GetArray()
@@ -674,7 +691,11 @@ def run_scan():
                 except Exception:
                     pass
             else:
-                print(f"  Grab failed slot {slot_idx:02d}")
+                consecutive_failures += 1
+                print(f"  Grab failed slot {slot_idx:02d} (failure {consecutive_failures}/3)")
+                if consecutive_failures >= 3:
+                    send_status("CAMERA_ERR")
+                    raise RuntimeError(f"Aborting scan due to consecutive grab failures at slot {slot_idx:02d}")
 
             grab_left.Release()
             grab_right.Release()
@@ -939,6 +960,19 @@ class TriggerHandler(LineReader):
         line = line.strip()
         print(f"Serial: {line}")
 
+        if line in ("TRIGGER", "CALIB_TRIGGER", "CALIB_ON", "CALIBRATE"):
+            if (
+                camera_left is None
+                or camera_right is None
+                or not camera_left.IsOpen()
+                or not camera_right.IsOpen()
+                or camera_left.IsCameraDeviceRemoved()
+                or camera_right.IsCameraDeviceRemoved()
+            ):
+                print("Serial trigger ignored: cameras not ready")
+                send_status("WAIT_CAMERAS")
+                return
+
         if calibration_mode:
             if line in ("TRIGGER", "CALIB_TRIGGER"):
                 capture_calibration_frame()
@@ -954,11 +988,11 @@ class TriggerHandler(LineReader):
 def run_runtime_once():
     global thread
     wait_for_serial()
+    thread = ReaderThread(ser, TriggerHandler)
+    thread.start()
     send_status("SYSTEM_BOOT")
     wait_for_cameras()
     wait_for_projector_scan()
-    thread = ReaderThread(ser, TriggerHandler)
-    thread.start()
     send_status("SCAN_MODE")
     print("Waiting for serial trigger...")
     while True:
@@ -969,6 +1003,8 @@ def run_runtime_once():
             raise RuntimeError("Camera handle missing")
         if not camera_left.IsOpen() or not camera_right.IsOpen():
             raise RuntimeError("Camera closed")
+        if camera_left.IsCameraDeviceRemoved() or camera_right.IsCameraDeviceRemoved():
+            raise RuntimeError("Camera device unplugged")
 
 
 # -------------------------------

@@ -209,12 +209,17 @@ void loop() {
   } else if (msg == "WAIT_CAMERAS") {
     waitingForScan = false;
     waitingForCapture = false;
-    lcdPrint("Waiting cameras ", "Please wait...  ");
+    lcdPrint("No Cameras Found", "Check USB cable ");
 
   } else if (msg == "WAIT_PROJECTOR") {
     waitingForScan = false;
     waitingForCapture = false;
-    lcdPrint("Waiting DLP     ", "Please wait...  ");
+    lcdPrint("Projector Off   ", "Check DLP power ");
+
+  } else if (msg == "CAMERA_ERR") {
+    waitingForScan = false;
+    waitingForCapture = false;
+    lcdPrint("Camera Error!   ", "Reconnecting... ");
 
   } else if (msg == "SYSTEM_RESTART") {
     waitingForScan = false;
