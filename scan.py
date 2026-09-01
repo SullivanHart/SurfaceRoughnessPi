@@ -48,9 +48,9 @@ parser.add_argument("--min-component-area", type=int, default=0)
 parser.add_argument("--no-zero-disparity-rectify", action="store_true")
 parser.add_argument("--no-postprocess", action="store_true",
                     help="Only capture images; skip reconstruction and roughness analysis")
-parser.add_argument("--roughness-grid-mm", type=float, default=0.30)
-parser.add_argument("--roughness-short-cutoff-mm", type=float, default=0.6)
-parser.add_argument("--roughness-long-cutoff-mm", type=float, default=8.0)
+parser.add_argument("--roughness-grid-mm", type=float, default=0.20)
+parser.add_argument("--roughness-short-cutoff-mm", type=float, default=1.0)
+parser.add_argument("--roughness-long-cutoff-mm", type=float, default=25.0)
 parser.add_argument("--roughness-save-grid", default="output/roughness/latest_grid.npz")
 parser.add_argument("--roughness-metrics-out", default="output/roughness/latest_metrics.json")
 parser.add_argument("--inter-pattern-delay", type=float, default=0.10,
