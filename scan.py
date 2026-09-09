@@ -31,8 +31,8 @@ def project_path(value):
 parser = argparse.ArgumentParser()
 parser.add_argument("--brightness", type=int, default=45, metavar="0-255")
 parser.add_argument("--exposure", type=int, default=350, metavar="US")
-parser.add_argument("--proj-pattern-ms", type=int, default=200,
-                    help="Projector display exposure per pattern in milliseconds (default: 200ms -> 3.9s scan)")
+parser.add_argument("--proj-pattern-ms", type=int, default=150,
+                    help="Projector display exposure per pattern in milliseconds")
 parser.add_argument("--patterns", type=int, default=40, help="Number of scan patterns to capture")
 parser.add_argument("--out-dir", default="data/captures/latest", help="Directory to write captured left/ and right/ images")
 parser.add_argument("--calib", default="config/calibration.npz")
