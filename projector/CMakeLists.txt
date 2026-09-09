@@ -58,3 +58,12 @@ add_executable(seq_test
 
 target_include_directories(seq_test PRIVATE sdk/include)
 target_link_libraries(seq_test ${HIDAPI_LIB})
+
+add_executable(flash_firmware
+    flash_firmware.cpp
+    sdk/dlpc350_api.cpp
+    sdk/dlpc350_usb.cpp
+)
+
+target_include_directories(flash_firmware PRIVATE sdk/include)
+target_link_libraries(flash_firmware ${HIDAPI_LIB})
