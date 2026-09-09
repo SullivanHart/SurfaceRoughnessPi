@@ -117,19 +117,11 @@ int main(int argc, char *argv[])
     }
     fprintf(stdout, "Connected to DLPC350.\n");
 
-    // 3. Enter Programming Mode
-    bool is_prog_mode = false;
-    DLPC350_GetProgrammingMode(&is_prog_mode);
-
-    if (!is_prog_mode) {
+    // 3. Enter Programming Mode if not already in it
+    uint16_t test_man_id = 0;
+    if (DLPC350_GetFlashManID(&test_man_id) < 0) {
         fprintf(stdout, "Switching DLPC350 into bootloader programming mode...\n");
-        if (DLPC350_EnterProgrammingMode() < 0) {
-            fprintf(stderr, "ERROR: Failed to issue EnterProgrammingMode command\n");
-            DLPC350_USB_Close();
-            free(file_buf);
-            return 1;
-        }
-
+        DLPC350_EnterProgrammingMode();
         fprintf(stdout, "Waiting for bootloader USB re-enumeration...\n");
         usleep(1500000); // 1.5 seconds settle time
         if (wait_for_usb_connection(10) < 0) {
