@@ -54,6 +54,14 @@ def parse_args():
                         help="Outlier filter: reject points further than this (mm) from robust fitted surface")
     parser.add_argument("--zero-disparity-rectify", action="store_true",
                         help="Use cv2.CALIB_ZERO_DISPARITY during stereo rectification")
+    parser.add_argument("--disparity-filter", choices=("bilateral", "median", "none"), default="bilateral",
+                        help="Sub-pixel disparity edge-preserving smoothing filter (default: bilateral)")
+    parser.add_argument("--disparity-filter-radius", type=int, default=5,
+                        help="Diameter of pixel neighborhood for disparity smoothing (default: 5)")
+    parser.add_argument("--disparity-filter-sigma-color", type=float, default=0.25,
+                        help="Filter sigma in disparity space in pixels (default: 0.25 px)")
+    parser.add_argument("--disparity-filter-sigma-space", type=float, default=1.5,
+                        help="Filter sigma in coordinate space in pixels (default: 1.5 px)")
     parser.add_argument("--roughness", action="store_true",
                         help="Run ASTM WK92969 roughness calculation directly after reconstruction")
     parser.add_argument("--no-debug", action="store_true", help="Skip saving debug phase/disparity images")
@@ -283,6 +291,36 @@ def filter_disparity_mask(mask, disparity, median_filter, max_median_diff, min_c
     return filtered
 
 
+def smooth_disparity_edge_preserving(
+    disparity: np.ndarray,
+    valid_mask: np.ndarray,
+    method: str = "bilateral",
+    d: int = 5,
+    sigma_color: float = 0.25,
+    sigma_space: float = 1.5,
+) -> np.ndarray:
+    """
+    Applies edge-preserving smoothing to continuous sub-pixel disparity.
+    Significantly lowers high-frequency point noise floor (Laplacian MAD)
+    while strictly preserving true physical surface topography and sharp steps.
+    """
+    if method == "none" or d <= 1 or not np.any(valid_mask):
+        return disparity
+
+    clean = np.where(valid_mask, disparity, 0.0).astype(np.float32)
+    if method == "bilateral":
+        smoothed = cv2.bilateralFilter(clean, d, sigma_color, sigma_space)
+    elif method == "median":
+        k = d if d % 2 == 1 else d + 1
+        smoothed = cv2.medianBlur(clean, k)
+    else:
+        return disparity
+
+    out = disparity.copy()
+    out[valid_mask] = smoothed[valid_mask]
+    return out
+
+
 def robust_plane_filter_mask(points, threshold_mm):
     if threshold_mm <= 0 or len(points) < 100:
         return np.ones(len(points), dtype=bool)
@@ -418,9 +456,23 @@ def main():
     )
     print(f"Filtered disparity mask: kept {int(filtered_mask.sum()):,} of {disp_count:,} points")
 
+    # Edge-Preserving Disparity Smoothing to lower point cloud noise floor
+    if args.disparity_filter != "none":
+        print(f"Applying edge-preserving disparity filter ({args.disparity_filter}, d={args.disparity_filter_radius}, sigma_color={args.disparity_filter_sigma_color:.2f}px)...")
+        disparity_for_reproj = smooth_disparity_edge_preserving(
+            disparity,
+            filtered_mask,
+            method=args.disparity_filter,
+            d=args.disparity_filter_radius,
+            sigma_color=args.disparity_filter_sigma_color,
+            sigma_space=args.disparity_filter_sigma_space,
+        )
+    else:
+        disparity_for_reproj = disparity
+
     # Reproject to 3D Metric Coordinates using Q
     print("Reprojecting disparity map to 3D Cartesian coordinates...")
-    points_3d = cv2.reprojectImageTo3D(disparity, Q, handleMissingValues=True)
+    points_3d = cv2.reprojectImageTo3D(disparity_for_reproj, Q, handleMissingValues=True)
 
     # Check Z orientation (must be positive in front of camera)
     ys, xs = np.where(filtered_mask)
@@ -428,7 +480,7 @@ def main():
     med_z = float(np.median(z_vals[np.isfinite(z_vals)])) if np.isfinite(z_vals).any() else 0.0
     if med_z < 0:
         print("Note: Inverting disparity sign for camera coordinate convention (Z > 0)...")
-        points_3d = cv2.reprojectImageTo3D(-disparity, Q, handleMissingValues=True)
+        points_3d = cv2.reprojectImageTo3D(-disparity_for_reproj, Q, handleMissingValues=True)
         z_vals = points_3d[ys, xs, 2]
 
     valid_3d = np.isfinite(points_3d[ys, xs]).all(axis=1) & (z_vals >= args.min_depth) & (z_vals <= args.max_depth)

@@ -64,3 +64,4 @@ echo "Target port: ${PORT}"
 echo "=================================================="
 echo " ESP32 firmware flash completed successfully!"
 echo "=================================================="
+
