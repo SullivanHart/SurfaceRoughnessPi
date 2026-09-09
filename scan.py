@@ -61,6 +61,8 @@ parser.add_argument("--disparity-filter-sigma-color", type=float, default=0.30,
                     help="Filter sigma in disparity space in pixels (default: 0.30 px)")
 parser.add_argument("--disparity-filter-sigma-space", type=float, default=1.5,
                     help="Filter sigma in coordinate space in pixels (default: 1.5 px)")
+parser.add_argument("--burst-count", type=int, default=1,
+                    help="Number of pattern bursts to average temporally for noise reduction (default: 1)")
 parser.add_argument("--settle-delay", type=float, default=1.5,
                     help="Seconds to wait after trigger to let mechanical vibration settle before burst")
 parser.add_argument("--plane-filter-mm", type=float, default=2.0,
@@ -481,7 +483,8 @@ NUM_PATTERNS = PROJECTOR_SLOT_COUNT
 print(
     f"Capture plan: mode={args.recon_mode} flash={args.flash_proj_width}x{args.flash_proj_height} "
     f"decode={args.proj_width}x{args.proj_height} "
-    f"projector_slots={PROJECTOR_SLOT_COUNT} saved_frames={EXPECTED_CAPTURE_COUNT}"
+    f"projector_slots={PROJECTOR_SLOT_COUNT} saved_frames={EXPECTED_CAPTURE_COUNT} "
+    f"burst_count={args.burst_count}"
 )
 
 
@@ -732,6 +735,9 @@ def run_scan():
         saved_count = 0
         consecutive_failures = 0
         buffered_pairs = []
+        accum_left = {}
+        accum_right = {}
+        accum_count = {}
 
         if args.settle_delay > 0:
             print(f"Holding steady: settling for {args.settle_delay:g}s...")
@@ -739,92 +745,122 @@ def run_scan():
 
         t_burst_start = time.time()
 
-        for slot_idx in range(PROJECTOR_SLOT_COUNT):
-            if camera_left.IsCameraDeviceRemoved() or camera_right.IsCameraDeviceRemoved():
-                send_status("CAMERA_ERR")
-                raise RuntimeError(f"Camera disconnected during scan at slot {slot_idx:02d}")
+        for burst_idx in range(args.burst_count):
+            if args.burst_count > 1:
+                print(f"\n--- Burst {burst_idx + 1}/{args.burst_count} ---")
+                if burst_idx > 0:
+                    time.sleep(0.05)
 
-            save_idx = CAPTURE_BY_SLOT.get(slot_idx)
-            if save_idx is None:
-                print(f"\nSlot {slot_idx:02d} (skip)")
-            else:
-                print(f"\nSlot {slot_idx:02d} -> saved frame {save_idx:02d}")
+            for slot_idx in range(PROJECTOR_SLOT_COUNT):
+                if camera_left.IsCameraDeviceRemoved() or camera_right.IsCameraDeviceRemoved():
+                    send_status("CAMERA_ERR")
+                    raise RuntimeError(f"Camera disconnected during scan at slot {slot_idx:02d}")
 
-            if not wait_for_trigger_lines_low():
-                print("  WARNING: trigger line stuck HIGH")
+                save_idx = CAPTURE_BY_SLOT.get(slot_idx)
+                if save_idx is None:
+                    print(f"\nSlot {slot_idx:02d} (skip)")
+                else:
+                    burst_tag = f" [burst {burst_idx + 1}/{args.burst_count}]" if args.burst_count > 1 else ""
+                    print(f"\nSlot {slot_idx:02d} -> saved frame {save_idx:02d}{burst_tag}")
 
-            print(
-                "  Before pulse:",
-                "L=", get_line1_status(camera_left),
-                "R=", get_line1_status(camera_right)
-            )
+                if not wait_for_trigger_lines_low():
+                    print("  WARNING: trigger line stuck HIGH")
 
-            fire_trigger()
-
-            print("  Trigger fired")
-
-            try:
-                grab_left = camera_left.RetrieveResult(
-                    FRAME_TIMEOUT_MS,
-                    pylon.TimeoutHandling_ThrowException
-                )
-
-                grab_right = camera_right.RetrieveResult(
-                    FRAME_TIMEOUT_MS,
-                    pylon.TimeoutHandling_ThrowException
-                )
-
-            except Exception as e:
-                consecutive_failures += 1
-                print(f"  TIMEOUT slot {slot_idx:02d} (failure {consecutive_failures}/3): {e}")
                 print(
-                    "  After timeout:",
+                    "  Before pulse:",
                     "L=", get_line1_status(camera_left),
                     "R=", get_line1_status(camera_right)
                 )
-                if camera_left.IsCameraDeviceRemoved() or camera_right.IsCameraDeviceRemoved() or consecutive_failures >= 3:
-                    send_status("CAMERA_ERR")
-                    raise RuntimeError(f"Aborting scan due to camera disconnection / repeated timeouts at slot {slot_idx:02d}") from e
 
-                time.sleep(INTER_PATTERN_DELAY_S)
-                continue
+                fire_trigger()
 
-            if grab_left.GrabSucceeded() and grab_right.GrabSucceeded():
-                consecutive_failures = 0
-                if save_idx is not None:
-                    img_left = converter_left.Convert(grab_left).GetArray()
-                    img_right = converter_right.Convert(grab_right).GetArray()
-                    buffered_pairs.append((save_idx, img_left, img_right))
-
-                    print(f"  Grabbed pair {save_idx:02d} (RAM buffer)")
-                    saved_count += 1
-                else:
-                    print(f"  Skipped slot {slot_idx:02d}")
+                print("  Trigger fired")
 
                 try:
-                    print(
-                        "  timestamps:",
-                        grab_left.TimeStamp,
-                        grab_right.TimeStamp
+                    grab_left = camera_left.RetrieveResult(
+                        FRAME_TIMEOUT_MS,
+                        pylon.TimeoutHandling_ThrowException
                     )
-                except Exception:
-                    pass
-            else:
-                consecutive_failures += 1
-                print(f"  Grab failed slot {slot_idx:02d} (failure {consecutive_failures}/3)")
-                if consecutive_failures >= 3:
-                    send_status("CAMERA_ERR")
-                    raise RuntimeError(f"Aborting scan due to consecutive grab failures at slot {slot_idx:02d}")
 
-            grab_left.Release()
-            grab_right.Release()
+                    grab_right = camera_right.RetrieveResult(
+                        FRAME_TIMEOUT_MS,
+                        pylon.TimeoutHandling_ThrowException
+                    )
 
-            time.sleep(INTER_PATTERN_DELAY_S)
+                except Exception as e:
+                    consecutive_failures += 1
+                    print(f"  TIMEOUT slot {slot_idx:02d} (failure {consecutive_failures}/3): {e}")
+                    print(
+                        "  After timeout:",
+                        "L=", get_line1_status(camera_left),
+                        "R=", get_line1_status(camera_right)
+                    )
+                    if camera_left.IsCameraDeviceRemoved() or camera_right.IsCameraDeviceRemoved() or consecutive_failures >= 3:
+                        send_status("CAMERA_ERR")
+                        raise RuntimeError(f"Aborting scan due to camera disconnection / repeated timeouts at slot {slot_idx:02d}") from e
+
+                    time.sleep(INTER_PATTERN_DELAY_S)
+                    continue
+
+                if grab_left.GrabSucceeded() and grab_right.GrabSucceeded():
+                    consecutive_failures = 0
+                    if save_idx is not None:
+                        img_left = converter_left.Convert(grab_left).GetArray()
+                        img_right = converter_right.Convert(grab_right).GetArray()
+
+                        if args.burst_count == 1:
+                            buffered_pairs.append((save_idx, img_left, img_right))
+                        else:
+                            if save_idx not in accum_left:
+                                accum_left[save_idx] = img_left.astype(np.uint16)
+                                accum_right[save_idx] = img_right.astype(np.uint16)
+                                accum_count[save_idx] = 1
+                            else:
+                                accum_left[save_idx] += img_left.astype(np.uint16)
+                                accum_right[save_idx] += img_right.astype(np.uint16)
+                                accum_count[save_idx] += 1
+
+                        print(f"  Grabbed pair {save_idx:02d} (RAM buffer)")
+                        if burst_idx == 0:
+                            saved_count += 1
+                    else:
+                        print(f"  Skipped slot {slot_idx:02d}")
+
+                    try:
+                        print(
+                            "  timestamps:",
+                            grab_left.TimeStamp,
+                            grab_right.TimeStamp
+                        )
+                    except Exception:
+                        pass
+                else:
+                    consecutive_failures += 1
+                    print(f"  Grab failed slot {slot_idx:02d} (failure {consecutive_failures}/3)")
+                    if consecutive_failures >= 3:
+                        send_status("CAMERA_ERR")
+                        raise RuntimeError(f"Aborting scan due to consecutive grab failures at slot {slot_idx:02d}")
+
+                grab_left.Release()
+                grab_right.Release()
+
+                time.sleep(INTER_PATTERN_DELAY_S)
 
         t_burst_end = time.time()
-        print(f"\nOptical capture burst completed in {t_burst_end - t_burst_start:.2f}s ({saved_count}/{EXPECTED_CAPTURE_COUNT} frames in RAM)")
+        burst_info = f" across {args.burst_count} bursts" if args.burst_count > 1 else ""
+        print(f"\nOptical capture burst completed in {t_burst_end - t_burst_start:.2f}s ({saved_count}/{EXPECTED_CAPTURE_COUNT} frames in RAM{burst_info})")
 
-        if buffered_pairs:
+        if args.burst_count > 1 and accum_left:
+            print(f"Averaging {len(accum_left)} image pairs across {args.burst_count} bursts and flushing to disk...")
+            t_flush_start = time.time()
+            for s_idx in sorted(accum_left.keys()):
+                cnt = accum_count[s_idx]
+                avg_l = np.clip(np.round(accum_left[s_idx] / cnt), 0, 255).astype(np.uint8)
+                avg_r = np.clip(np.round(accum_right[s_idx] / cnt), 0, 255).astype(np.uint8)
+                cv2.imwrite(str(CAPTURE_DIR_LEFT / f"left_{s_idx:02d}.png"), avg_l)
+                cv2.imwrite(str(CAPTURE_DIR_RIGHT / f"right_{s_idx:02d}.png"), avg_r)
+            print(f"Disk write completed in {time.time() - t_flush_start:.2f}s")
+        elif buffered_pairs:
             print(f"Flushing {len(buffered_pairs)} image pairs to disk...")
             t_flush_start = time.time()
             for s_idx, i_left, i_right in buffered_pairs:
