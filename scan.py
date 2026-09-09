@@ -506,6 +506,16 @@ def run_postprocess():
             str(args.gray_bits),
             "--min-disparity",
             str(args.min_disparity),
+            "--plane-filter-mm",
+            str(args.plane_filter_mm),
+            "--min-component-area",
+            str(args.min_component_area),
+            "--median-filter",
+            str(args.median_filter),
+            "--max-median-diff",
+            str(args.max_median_diff),
+            "--disparity-sign",
+            "auto",
         ]
         if not args.no_zero_disparity_rectify:
             recon_cmd.append("--zero-disparity-rectify")
