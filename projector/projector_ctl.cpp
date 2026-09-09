@@ -27,9 +27,10 @@
 // ── Configuration ─────────────────────────────────────────────────────────────
 // Match these to the values used when the firmware was originally built.
 
-static const int          NUM_GRAY_PATTERNS = 44;    // default flash image slots 0–43
+static const int          NUM_GRAY_PATTERNS = 44;    // legacy Gray-code flash image slots 0–43
+static const int          NUM_PHASE_PATTERNS = 20;   // v18 hybrid phase-shift slots 0–19
 static const int          NUM_LEGACY_PATTERNS = 16;  // flash image slots 0–15
-static const int          CALIB_IMAGE_INDEX = 42;    // white image in slot 42 for Gray-code set
+static const int          CALIB_IMAGE_INDEX = 18;    // white image in slot 18 for v18 20-pattern set
 static const unsigned int EXPOSURE_US       = 500000; // 500 ms
 static const int          BITDEPTH          = 8;     // MONO_8BPP
 static const int          LED_SELECT        = 7;     // WHITE (R+G+B simultaneous)

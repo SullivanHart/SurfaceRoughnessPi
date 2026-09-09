@@ -69,7 +69,7 @@ parser.add_argument("--inter-pattern-delay", type=float, default=0.10,
 parser.add_argument("--debug-reconstruction", action="store_true",
                     help="Write reconstruction debug images and bit contrast diagnostics")
 parser.add_argument("--legacy16", action="store_true", help="Use the old 16-pattern sinusoidal projector sequence")
-parser.add_argument("--recon-mode", choices=("phase", "gray"), default="gray",
+parser.add_argument("--recon-mode", choices=("phase", "gray"), default="phase",
                     help="Reconstruction method: 'phase' for subpixel phase-stereo (<10 um noise), or 'gray' for legacy Gray-code")
 parser.add_argument("--phase-period", type=int, default=16, help="Fringe period for phase reconstruction (default: 16)")
 parser.add_argument("--phase-steps", type=int, default=8, help="Phase shift steps (default: 8)")
