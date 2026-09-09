@@ -41,10 +41,21 @@ parser.add_argument("--flash-proj-width", type=int, default=456,
                     help="Effective projector width used when generating the flashed pattern set")
 parser.add_argument("--flash-proj-height", type=int, default=570,
                     help="Effective projector height used when generating the flashed pattern set")
-parser.add_argument("--white-thresh", type=int, default=2)
-parser.add_argument("--black-thresh", type=int, default=2)
+parser.add_argument("--white-thresh", type=int, default=1)
+parser.add_argument("--black-thresh", type=int, default=1)
 parser.add_argument("--min-disparity", type=float, default=1.0)
-parser.add_argument("--min-component-area", type=int, default=0)
+parser.add_argument("--min-component-area", type=int, default=1000,
+                    help="Reject connected mask components smaller than this (0 disables)")
+parser.add_argument("--median-filter", type=int, default=5,
+                    help="Odd kernel size for disparity outlier filtering (0 disables; keep 0 for tilted surfaces)")
+parser.add_argument("--max-median-diff", type=float, default=0.5,
+                    help="Reject pixels whose disparity differs from local median by more than this")
+parser.add_argument("--plane-filter-mm", type=float, default=2.0,
+                    help="Keep points within this distance of a robust fitted plane in 3D (0 disables)")
+parser.add_argument("--roughness-out-ply", default="output/pointclouds/latest_roughness.ply",
+                    help="Path to write colorized roughness PLY")
+parser.add_argument("--preview-out", default="output/pointclouds/latest_preview.png",
+                    help="Path to write live 2D preview image")
 parser.add_argument("--no-zero-disparity-rectify", action="store_true")
 parser.add_argument("--no-postprocess", action="store_true",
                     help="Only capture images; skip reconstruction and roughness analysis")
@@ -516,6 +527,12 @@ def run_postprocess():
             str(args.proj_height),
             "--min-component-area",
             str(args.min_component_area),
+            "--median-filter",
+            str(args.median_filter),
+            "--max-median-diff",
+            str(args.max_median_diff),
+            "--plane-filter-mm",
+            str(args.plane_filter_mm),
             "--white-thresh",
             str(args.white_thresh),
             "--black-thresh",
@@ -537,6 +554,34 @@ def run_postprocess():
     run_roughness_analysis()
     if args.roughness_metrics_out:
         send_result(project_path(args.roughness_metrics_out))
+
+    grid_file = project_path(args.roughness_save_grid)
+    if grid_file.exists():
+        try:
+            overlay_cmd = [
+                sys.executable,
+                str(TOOLS_DIR / "presentation" / "overlay_ply_grid.py"),
+                str(project_path(args.recon_out)),
+                "--roughness-grid",
+                str(grid_file),
+                "--show-grid-lines",
+                "--out",
+                str(project_path(args.roughness_out_ply)),
+            ]
+            run_command("Generating colorized roughness point cloud", overlay_cmd)
+
+            render_cmd = [
+                sys.executable,
+                str(TOOLS_DIR / "presentation" / "ply_to_png.py"),
+                str(project_path(args.roughness_out_ply)),
+                "--color",
+                "ply",
+                "--out",
+                str(project_path(args.preview_out)),
+            ]
+            run_command("Generating live preview image", render_cmd)
+        except Exception as e:
+            print(f"Warning: could not generate roughness visual overlay / preview: {e}")
 
 
 def detect_checkerboard(gray):
