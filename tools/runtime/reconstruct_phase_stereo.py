@@ -54,10 +54,10 @@ def parse_args():
                         help="Outlier filter: reject points further than this (mm) from robust fitted surface")
     parser.add_argument("--zero-disparity-rectify", action="store_true",
                         help="Use cv2.CALIB_ZERO_DISPARITY during stereo rectification")
-    parser.add_argument("--disparity-filter", choices=("bilateral", "median", "none"), default="bilateral",
-                        help="Sub-pixel disparity edge-preserving smoothing filter (default: bilateral)")
-    parser.add_argument("--disparity-filter-radius", type=int, default=5,
-                        help="Diameter of pixel neighborhood for disparity smoothing (default: 5)")
+    parser.add_argument("--disparity-filter", choices=("bilateral", "median", "none"), default="median",
+                        help="Sub-pixel disparity edge-preserving smoothing filter (default: median)")
+    parser.add_argument("--disparity-filter-radius", type=int, default=3,
+                        help="Diameter of pixel neighborhood for disparity smoothing (default: 3)")
     parser.add_argument("--disparity-filter-sigma-color", type=float, default=0.30,
                         help="Filter sigma in disparity space in pixels (default: 0.30 px)")
     parser.add_argument("--disparity-filter-sigma-space", type=float, default=1.5,
