@@ -132,15 +132,19 @@ def raster_synchronized(
 
 def coarse_align_2d(
     ref_pts: np.ndarray, cap_pts: np.ndarray, pitch: float = 0.5, num_angles: int = 180
-) -> tuple[bool, float, tuple[float, float], float]:
-    """Finds best 2D rotation and translation via normalized cross-correlation."""
+) -> tuple[bool, bool, float, tuple[float, float], float]:
+    """Finds best 2D rotation, flip, translation, and elevation polarity (Z) via normalized cross-correlation.
+
+    Returns:
+        (invert_z, flip, angle_deg, (tx_mm, ty_mm), score)
+    """
     import cv2
 
     feat_ref, _, orig_ref = make_elevation_feature_map(ref_pts, pitch)
     feat_cap, _, orig_cap = make_elevation_feature_map(cap_pts, pitch)
 
     best_score = -1.0
-    best_match = (False, 0.0, (0.0, 0.0), -1.0)
+    best_match = (False, False, 0.0, (0.0, 0.0), -1.0)
 
     angles = np.linspace(0, 360, num_angles, endpoint=False)
     h_c, w_c = feat_cap.shape
@@ -157,12 +161,21 @@ def coarse_align_2d(
                 continue
 
             res = cv2.matchTemplate(feat_ref, rot_c, cv2.TM_CCOEFF_NORMED)
-            _, max_v, _, max_loc = cv2.minMaxLoc(res)
+            min_v, max_v, min_loc, max_loc = cv2.minMaxLoc(res)
+
+            # Upright Z match (+Z = peaks)
             if max_v > best_score:
                 best_score = max_v
                 tx = orig_ref[0] + (max_loc[0] + w_c / 2.0) * pitch
                 ty = orig_ref[1] + (max_loc[1] + h_c / 2.0) * pitch
-                best_match = (flip, float(angle), (tx, ty), float(max_v))
+                best_match = (False, flip, float(angle), (tx, ty), float(max_v))
+
+            # Inverted Z match (-Z = peaks; valleys match peaks)
+            if -min_v > best_score:
+                best_score = -min_v
+                tx = orig_ref[0] + (min_loc[0] + w_c / 2.0) * pitch
+                ty = orig_ref[1] + (min_loc[1] + h_c / 2.0) * pitch
+                best_match = (True, flip, float(angle), (tx, ty), float(-min_v))
 
     return best_match
 
@@ -394,19 +407,19 @@ def verify_samples(
     ref_aligned, _, _ = align_to_z(ref_raw)
     cap_aligned, _, _ = align_to_z(cap_raw)
 
-    is_cam = bool(np.mean(cap_raw[:, 2]) > 50.0)
-    if is_cam:
-        print("Detected camera coordinate system: converting distance to elevation (+Z = peaks)...")
-        cap_aligned[:, 2] = -cap_aligned[:, 2]
-
     # 2. Downsample for registration
     ref_down = voxel_downsample_fast(ref_aligned, 0.5)
     cap_down = voxel_downsample_fast(cap_aligned, 0.5)
 
-    # 3. Coarse 2D Alignment (search orientation & translation)
-    print("Performing multi-scale 2D orientation & translation search...")
-    flip, angle, loc, score = coarse_align_2d(ref_down, cap_down, pitch=0.5, num_angles=180)
-    print(f"Coarse 2D Match: flip={flip}, angle={angle:.1f} deg, translation=({loc[0]:.1f}, {loc[1]:.1f}) mm, score={score:.3f}")
+    # 3. Coarse 2D Alignment (search orientation, polarity & translation)
+    print("Performing multi-scale 2D orientation, polarity & translation search...")
+    invert_z, flip, angle, loc, score = coarse_align_2d(ref_down, cap_down, pitch=0.5, num_angles=180)
+    print(f"Coarse 2D Match: invert_z={invert_z}, flip={flip}, angle={angle:.1f} deg, translation=({loc[0]:.1f}, {loc[1]:.1f}) mm, score={score:.3f}")
+
+    if invert_z:
+        print("Detected inverted surface elevation polarity: orienting +Z to peaks...")
+        cap_aligned[:, 2] = -cap_aligned[:, 2]
+        cap_down[:, 2] = -cap_down[:, 2]
 
     # Apply coarse transform
     cap_rough = cap_down.copy()
