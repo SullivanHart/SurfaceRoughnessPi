@@ -65,14 +65,22 @@ String valueAfterKey(const String& msg, const char* key) {
 }
 
 void showResult(const String& msg) {
-  String sa  = valueAfterKey(msg, "SA=");
-  String sq  = valueAfterKey(msg, "SQ=");
-  String svr = valueAfterKey(msg, "SVR=");
+  String sa    = valueAfterKey(msg, "SA=");
+  String sq    = valueAfterKey(msg, "SQ=");
+  String svr   = valueAfterKey(msg, "SVR=");
+  String noise = valueAfterKey(msg, "NF=");
+  if (noise.length() == 0) {
+    noise = valueAfterKey(msg, "NOISE=");
+  }
 
   char line0[17];
   char line1[17];
   snprintf(line0, sizeof(line0), "Sa%s Sq%s", sa.c_str(), sq.c_str());
-  snprintf(line1, sizeof(line1), "Svr%s um", svr.c_str());
+  if (noise.length() > 0 && noise != "0.0") {
+    snprintf(line1, sizeof(line1), "Svr%s NF%s", svr.c_str(), noise.c_str());
+  } else {
+    snprintf(line1, sizeof(line1), "Svr%s um", svr.c_str());
+  }
   lcdPrint(line0, line1);
   resultDisplayed = true;
 }

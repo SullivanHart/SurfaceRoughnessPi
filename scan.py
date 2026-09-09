@@ -487,9 +487,10 @@ def send_result(metrics_path):
         raw_svr = float(metrics.get("svr_raw_um", svr))
         if noise > 0:
             print(f"Roughness Result: Sa={sa:.1f} um, Sq={sq:.1f} um, Svr={svr:.1f} um (noise floor: {noise:.1f} um, raw Svr: {raw_svr:.1f} um)")
+            send_status(f"RESULT SA={sa:.1f} SQ={sq:.1f} SVR={svr:.1f} NF={noise:.1f}")
         else:
             print(f"Roughness Result: Sa={sa:.1f} um, Sq={sq:.1f} um, Svr={svr:.1f} um")
-        send_status(f"RESULT SA={sa:.1f} SQ={sq:.1f} SVR={svr:.1f}")
+            send_status(f"RESULT SA={sa:.1f} SQ={sq:.1f} SVR={svr:.1f}")
     except Exception as e:
         print(f"Could not send roughness result: {e}")
 
