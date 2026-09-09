@@ -31,6 +31,8 @@ def project_path(value):
 parser = argparse.ArgumentParser()
 parser.add_argument("--brightness", type=int, default=34, metavar="0-255")
 parser.add_argument("--exposure", type=int, default=250, metavar="US")
+parser.add_argument("--proj-pattern-ms", type=int, default=250,
+                    help="Projector display exposure per pattern in milliseconds (default: 250ms -> 5.0s scan)")
 parser.add_argument("--patterns", type=int, default=40, help="Number of scan patterns to capture")
 parser.add_argument("--out-dir", default="data/captures/latest", help="Directory to write captured left/ and right/ images")
 parser.add_argument("--calib", default="config/calibration.npz")
@@ -276,7 +278,7 @@ def ensure_projector_scan():
     if args.legacy16:
         proj.start_scan16()
     else:
-        proj.start_scan(NUM_PATTERNS)
+        proj.start_scan(NUM_PATTERNS, exposure_ms=args.proj_pattern_ms)
     proj.set_brightness(args.brightness)
 
 
@@ -285,7 +287,7 @@ def wait_for_projector_scan():
     while True:
         try:
             ensure_projector_scan()
-            print(f"Projector: scan sequence ready  brightness={args.brightness}  exposure={args.exposure}us")
+            print(f"Projector: scan sequence ready  brightness={args.brightness}  cam_exposure={args.exposure}us  proj_pattern={args.proj_pattern_ms}ms")
             return
         except Exception as e:
             send_status("WAIT_PROJECTOR")

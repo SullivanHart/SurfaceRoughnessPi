@@ -118,18 +118,21 @@ def stop() -> None:
     _kill_daemon()
 
 
-def start_scan(count: int = 44) -> None:
+def start_scan(count: int = 44, exposure_ms: int = 250) -> None:
     """
-    Switch to a Gray-code scan sequence (flash slots 0..count-1).
+    Switch to a scan sequence (flash slots 0..count-1).
     Reprograms the LUT if not already in scan mode.
     """
     global _mode
     if not 1 <= count <= 256:
         raise ValueError(f"scan count must be 1-256, got {count}")
-    mode = f"scan:{count}"
+    mode = f"scan:{count}:{exposure_ms}"
     if _daemon_alive() and _mode == mode:
         return
-    _launch_daemon(["scan", str(count)])
+    if _daemon_alive():
+        _send_command(f"scan {count} {exposure_ms}")
+    else:
+        _launch_daemon(["scan", str(count), str(exposure_ms)])
     _mode = mode
 
 

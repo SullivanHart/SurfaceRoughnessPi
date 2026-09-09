@@ -31,7 +31,7 @@ static const int          NUM_GRAY_PATTERNS = 44;    // legacy Gray-code flash i
 static const int          NUM_PHASE_PATTERNS = 20;   // v18 hybrid phase-shift slots 0–19
 static const int          NUM_LEGACY_PATTERNS = 16;  // flash image slots 0–15
 static const int          CALIB_IMAGE_INDEX = 18;    // white image in slot 18 for v18 20-pattern set
-static const unsigned int SCAN_EXPOSURE_US  = 500000; // 500 ms (full 8-bit PWM integration)
+static const unsigned int SCAN_EXPOSURE_US  = 250000; // 250 ms default (20 patterns in 5.0s, safe above 150ms SPI load)
 static const unsigned int CALIB_EXPOSURE_US = 200000; // 200 ms for calibration
 static const int          BITDEPTH          = 8;     // MONO_8BPP
 static const int          LED_SELECT        = 7;     // WHITE (R+G+B simultaneous)
@@ -70,7 +70,7 @@ static void signal_handler(int)
  * Program the DLPC350 to play `count` flash images starting at `first_image`
  * using external-positive-edge trigger.  Used for scan mode.
  */
-static void start_sequence(int first_image, int count, bool repeat)
+static void start_sequence(int first_image, int count, bool repeat, unsigned int exposure_us = SCAN_EXPOSURE_US)
 {
     // Stop whatever is currently running
     if (DLPC350_PatternDisplay(DISP_STOP) < 0)
@@ -97,8 +97,8 @@ static void start_sequence(int first_image, int count, bool repeat)
                 true,           // insert black (required for ext trigger)
                 true,           // buffer swap
                 false,          // trigger_out_share_prev
-                SCAN_EXPOSURE_US,
-                SCAN_EXPOSURE_US) < 0)
+                exposure_us,
+                exposure_us) < 0)
             cleanup_and_die("AddToExpLut failed");
     }
 
@@ -278,6 +278,7 @@ int main(int argc, char *argv[])
     int led_select = LED_SELECT;
     int slot_index = CALIB_IMAGE_INDEX;
     int scan_count = NUM_GRAY_PATTERNS;
+    int scan_exposure_ms = 250;
     if (strcmp(cmd, "slot") == 0) {
         if (argc < 3) {
             fprintf(stderr, "ERROR: slot requires an image index\n");
@@ -307,6 +308,13 @@ int main(int argc, char *argv[])
             scan_count = atoi(argv[2]);
             if (scan_count < 1 || scan_count > 256) {
                 fprintf(stderr, "ERROR: scan count must be 1-256 (got %d)\n", scan_count);
+                return 1;
+            }
+        }
+        if (argc >= 4) {
+            scan_exposure_ms = atoi(argv[3]);
+            if (scan_exposure_ms < 100 || scan_exposure_ms > 2000) {
+                fprintf(stderr, "ERROR: scan exposure must be 100-2000 ms (got %d)\n", scan_exposure_ms);
                 return 1;
             }
         }
@@ -389,7 +397,7 @@ int main(int argc, char *argv[])
             cleanup_and_die("SetMode(pattern_sequence) failed");
         usleep(50000);
         if (strcmp(cmd, "scan") == 0) {
-            start_sequence(0, scan_count, true);
+            start_sequence(0, scan_count, true, (unsigned int)(scan_exposure_ms * 1000));
         } else if (strcmp(cmd, "scan16") == 0) {
             start_sequence(0, NUM_LEGACY_PATTERNS, true);
         } else if (strcmp(cmd, "slot") == 0) {
@@ -513,15 +521,24 @@ int main(int argc, char *argv[])
             fflush(stdout);
         } else if (strncmp(line, "scan", 4) == 0 && (line[4] == '\0' || line[4] == ' ')) {
             int count = NUM_GRAY_PATTERNS;
+            unsigned int exp_us = SCAN_EXPOSURE_US;
             if (line[4] == ' ' && line[5] != '\0') {
-                count = atoi(line + 5);
+                char *p = line + 5;
+                count = atoi(p);
                 if (count < 1 || count > 256) {
                     fprintf(stdout, "ERROR: scan count must be 1-256\n");
                     fflush(stdout);
                     continue;
                 }
+                char *sp = strchr(p, ' ');
+                if (sp && *(sp + 1)) {
+                    int ems = atoi(sp + 1);
+                    if (ems >= 100 && ems <= 2000) {
+                        exp_us = (unsigned int)(ems * 1000);
+                    }
+                }
             }
-            start_sequence(0, count, true);
+            start_sequence(0, count, true, exp_us);
             printf("READY\n");
             fflush(stdout);
         } else if (strcmp(line, "scan16") == 0) {
