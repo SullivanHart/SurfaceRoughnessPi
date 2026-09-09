@@ -93,9 +93,9 @@ int main(int argc, char *argv[])
     }
     fclose(fp);
 
-    // Compute expected 32-bit checksum
+    // Compute expected 32-bit checksum for the programmed application/pattern payload
     uint32_t expected_checksum = 0;
-    for (long i = 0; i < file_size; i++) {
+    for (long i = BOOTLOADER_SIZE; i < file_size; i++) {
         expected_checksum += file_buf[i];
     }
     fprintf(stdout, "Firmware size:    %ld bytes (%.2f MB)\n", file_size, file_size / (1024.0 * 1024.0));
