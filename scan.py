@@ -58,6 +58,11 @@ parser.add_argument("--inter-pattern-delay", type=float, default=0.10,
 parser.add_argument("--debug-reconstruction", action="store_true",
                     help="Write reconstruction debug images and bit contrast diagnostics")
 parser.add_argument("--legacy16", action="store_true", help="Use the old 16-pattern sinusoidal projector sequence")
+parser.add_argument("--recon-mode", choices=("phase", "gray"), default="gray",
+                    help="Reconstruction method: 'phase' for subpixel phase-stereo (<10 um noise), or 'gray' for legacy Gray-code")
+parser.add_argument("--phase-period", type=int, default=16, help="Fringe period for phase reconstruction (default: 16)")
+parser.add_argument("--phase-steps", type=int, default=8, help="Phase shift steps (default: 8)")
+parser.add_argument("--gray-bits", type=int, default=5, help="Coarse Gray-code bits (default: 5)")
 parser.add_argument("--checkerboard", default="10x6",
                     help="Calibration checkerboard inner corners as COLSxROWS")
 parser.add_argument("--square-size-mm", type=float, default=10.0)
@@ -427,6 +432,11 @@ def make_capture_plan():
     if args.legacy16:
         return {idx: idx for idx in range(16)}, 16, 16
 
+    if args.recon_mode == "phase":
+        phase_count = args.phase_steps + 2 * args.gray_bits + 2
+        capture_by_slot = {idx: idx for idx in range(phase_count)}
+        return capture_by_slot, phase_count, phase_count
+
     mapping, flash_total = find_pattern_mapping(
         args.flash_proj_width,
         args.flash_proj_height,
@@ -445,7 +455,7 @@ def make_capture_plan():
 CAPTURE_BY_SLOT, PROJECTOR_SLOT_COUNT, EXPECTED_CAPTURE_COUNT = make_capture_plan()
 NUM_PATTERNS = PROJECTOR_SLOT_COUNT
 print(
-    f"Capture plan: flash={args.flash_proj_width}x{args.flash_proj_height} "
+    f"Capture plan: mode={args.recon_mode} flash={args.flash_proj_width}x{args.flash_proj_height} "
     f"decode={args.proj_width}x{args.proj_height} "
     f"projector_slots={PROJECTOR_SLOT_COUNT} saved_frames={EXPECTED_CAPTURE_COUNT}"
 )
@@ -467,34 +477,58 @@ def run_postprocess():
         print("Post-processing disabled (--no-postprocess)")
         return
 
-    recon_cmd = [
-        sys.executable,
-        str(TOOLS_DIR / "runtime" / "reconstruct_local_gray.py"),
-        "--caps",
-        str(CAPTURE_ROOT),
-        "--calib",
-        str(project_path(args.calib)),
-        "--out",
-        str(project_path(args.recon_out)),
-        "--proj-width",
-        str(args.proj_width),
-        "--proj-height",
-        str(args.proj_height),
-        "--min-component-area",
-        str(args.min_component_area),
-        "--white-thresh",
-        str(args.white_thresh),
-        "--black-thresh",
-        str(args.black_thresh),
-        "--disparity-sign",
-        "positive",
-        "--min-disparity",
-        str(args.min_disparity),
-    ]
-    if not args.no_zero_disparity_rectify:
-        recon_cmd.append("--zero-disparity-rectify")
-    if not args.debug_reconstruction:
-        recon_cmd.extend(["--no-debug", "--no-bit-debug"])
+    if args.recon_mode == "phase":
+        recon_cmd = [
+            sys.executable,
+            str(TOOLS_DIR / "runtime" / "reconstruct_phase_stereo.py"),
+            "--caps",
+            str(CAPTURE_ROOT),
+            "--calib",
+            str(project_path(args.calib)),
+            "--out",
+            str(project_path(args.recon_out)),
+            "--period",
+            str(args.phase_period),
+            "--num-phases",
+            str(args.phase_steps),
+            "--gray-bits",
+            str(args.gray_bits),
+            "--min-disparity",
+            str(args.min_disparity),
+        ]
+        if not args.no_zero_disparity_rectify:
+            recon_cmd.append("--zero-disparity-rectify")
+        if not args.debug_reconstruction:
+            recon_cmd.append("--no-debug")
+    else:
+        recon_cmd = [
+            sys.executable,
+            str(TOOLS_DIR / "runtime" / "reconstruct_local_gray.py"),
+            "--caps",
+            str(CAPTURE_ROOT),
+            "--calib",
+            str(project_path(args.calib)),
+            "--out",
+            str(project_path(args.recon_out)),
+            "--proj-width",
+            str(args.proj_width),
+            "--proj-height",
+            str(args.proj_height),
+            "--min-component-area",
+            str(args.min_component_area),
+            "--white-thresh",
+            str(args.white_thresh),
+            "--black-thresh",
+            str(args.black_thresh),
+            "--disparity-sign",
+            "positive",
+            "--min-disparity",
+            str(args.min_disparity),
+        ]
+        if not args.no_zero_disparity_rectify:
+            recon_cmd.append("--zero-disparity-rectify")
+        if not args.debug_reconstruction:
+            recon_cmd.extend(["--no-debug", "--no-bit-debug"])
 
     send_status("RECONSTRUCTING")
     run_command("Reconstructing point cloud", recon_cmd)
