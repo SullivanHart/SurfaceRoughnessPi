@@ -31,7 +31,8 @@ static const int          NUM_GRAY_PATTERNS = 44;    // legacy Gray-code flash i
 static const int          NUM_PHASE_PATTERNS = 20;   // v18 hybrid phase-shift slots 0–19
 static const int          NUM_LEGACY_PATTERNS = 16;  // flash image slots 0–15
 static const int          CALIB_IMAGE_INDEX = 18;    // white image in slot 18 for v18 20-pattern set
-static const unsigned int EXPOSURE_US       = 500000; // 500 ms
+static const unsigned int SCAN_EXPOSURE_US  = 50000;  // 50 ms (20-pattern burst in 1.0s)
+static const unsigned int CALIB_EXPOSURE_US = 200000; // 200 ms for calibration
 static const int          BITDEPTH          = 8;     // MONO_8BPP
 static const int          LED_SELECT        = 7;     // WHITE (R+G+B simultaneous)
 static const int          PATTERN_NUMBER    = 0;     // bit-plane 0 for 8bpp (G7–G0)
@@ -96,8 +97,8 @@ static void start_sequence(int first_image, int count, bool repeat)
                 true,           // insert black (required for ext trigger)
                 true,           // buffer swap
                 false,          // trigger_out_share_prev
-                EXPOSURE_US,
-                EXPOSURE_US) < 0)
+                SCAN_EXPOSURE_US,
+                SCAN_EXPOSURE_US) < 0)
             cleanup_and_die("AddToExpLut failed");
     }
 
@@ -205,8 +206,8 @@ static void start_single_slot_sequence(int image_index, int brightness, int led_
             true,        // insert_black (required for ext trigger)
             true,        // buf_swap=true: load from flash every trigger → TRIG_OUT_2 fires
             false,       // trigger_out_share_prev
-            EXPOSURE_US,
-            EXPOSURE_US) < 0)
+            CALIB_EXPOSURE_US,
+            CALIB_EXPOSURE_US) < 0)
         cleanup_and_die("AddToExpLut (calibrate) failed");
 
     if (DLPC350_SetPatternDisplayMode(false) < 0)

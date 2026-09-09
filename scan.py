@@ -49,8 +49,10 @@ parser.add_argument("--min-component-area", type=int, default=1000,
                     help="Reject connected mask components smaller than this (0 disables)")
 parser.add_argument("--median-filter", type=int, default=5,
                     help="Odd kernel size for disparity outlier filtering (0 disables; keep 0 for tilted surfaces)")
-parser.add_argument("--max-median-diff", type=float, default=0.5,
+parser.add_argument("--max-median-diff", type=float, default=1.5,
                     help="Reject pixels whose disparity differs from local median by more than this")
+parser.add_argument("--settle-delay", type=float, default=1.5,
+                    help="Seconds to wait after trigger to let mechanical vibration settle before burst")
 parser.add_argument("--plane-filter-mm", type=float, default=2.0,
                     help="Keep points within this distance of a robust fitted plane in 3D (0 disables)")
 parser.add_argument("--roughness-out-ply", default="output/pointclouds/latest_roughness.ply",
@@ -711,6 +713,11 @@ def run_scan():
         saved_count = 0
         consecutive_failures = 0
         buffered_pairs = []
+
+        if args.settle_delay > 0:
+            print(f"Holding steady: settling for {args.settle_delay:g}s...")
+            time.sleep(args.settle_delay)
+
         t_burst_start = time.time()
 
         for slot_idx in range(PROJECTOR_SLOT_COUNT):
