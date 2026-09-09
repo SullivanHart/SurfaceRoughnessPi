@@ -118,16 +118,16 @@ def stop() -> None:
     _kill_daemon()
 
 
-def start_scan(count: int = 44, exposure_ms: int = 200, force: bool = False) -> None:
+def start_scan(count: int = 44, exposure_ms: int = 200) -> None:
     """
     Switch to a scan sequence (flash slots 0..count-1).
-    Reprograms the LUT if not already in scan mode or if force=True.
+    Reprograms the LUT if not already in scan mode.
     """
     global _mode
     if not 1 <= count <= 256:
         raise ValueError(f"scan count must be 1-256, got {count}")
     mode = f"scan:{count}:{exposure_ms}"
-    if not force and _daemon_alive() and _mode == mode:
+    if _daemon_alive() and _mode == mode:
         return
     if _daemon_alive():
         _send_command(f"scan {count} {exposure_ms}")

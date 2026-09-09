@@ -274,11 +274,11 @@ def run_roughness_analysis():
         print(f"Wrote metrics: {metrics_path}")
 
 
-def ensure_projector_scan(force: bool = False):
+def ensure_projector_scan():
     if args.legacy16:
         proj.start_scan16()
     else:
-        proj.start_scan(NUM_PATTERNS, exposure_ms=args.proj_pattern_ms, force=force)
+        proj.start_scan(NUM_PATTERNS, exposure_ms=args.proj_pattern_ms)
     proj.set_brightness(args.brightness)
 
 
@@ -703,7 +703,7 @@ def run_scan():
     scan_count += 1
 
     try:
-        ensure_projector_scan(force=True)
+        ensure_projector_scan()
         print(f"\n=== Starting scan {scan_count} ===")
 
         clear_directory(CAPTURE_DIR_LEFT)
