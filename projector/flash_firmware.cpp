@@ -143,7 +143,7 @@ int main(int argc, char *argv[])
 
     // 4. Query Flash Hardware IDs
     uint16_t man_id = 0;
-    uint64_t dev_id = 0;
+    unsigned long long dev_id = 0;
     if (DLPC350_GetFlashManID(&man_id) < 0 || DLPC350_GetFlashDevID(&dev_id) < 0) {
         fprintf(stderr, "WARNING: Could not query flash IDs (proceeding with standard flash type)\n");
     } else {
