@@ -155,31 +155,58 @@ def filter_mask(mask, disparity, median_filter, max_median_diff, min_component_a
             median_filter += 1
         safe = np.where(filtered, disparity, 0).astype(np.float32)
         local_median = cv2.medianBlur(safe, median_filter)
-        filtered &= np.abs(disparity - local_median) <= max_median_diff
+        
+        # In sparse areas (like shadows), the neighborhood is mostly 0, so local_median becomes 0.
+        # We only want to reject points as "salt noise" if they exist in a densely valid neighborhood.
+        valid_median = local_median > 0
+        filtered &= ~(valid_median & (np.abs(disparity - local_median) > max_median_diff))
 
     if min_component_area > 1:
-        count, labels, stats, _ = cv2.connectedComponentsWithStats(filtered.astype(np.uint8), 8)
+        # Bridge small gaps caused by sparsity before calculating connected components
+        kernel = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (5, 5))
+        closed = cv2.morphologyEx(filtered.astype(np.uint8), cv2.MORPH_CLOSE, kernel)
+        count, labels, stats, _ = cv2.connectedComponentsWithStats(closed, 8)
         keep_labels = np.zeros(count, dtype=bool)
         keep_labels[0] = False
         for label in range(1, count):
             keep_labels[label] = stats[label, cv2.CC_STAT_AREA] >= min_component_area
-        filtered = keep_labels[labels]
+        filtered = keep_labels[labels] & filtered
 
     return filtered
 
 
 def write_ply(path, points, colors):
+    """Write binary-little-endian PLY (3× smaller than ASCII; loads via the
+    reliable transfer-via-fetch path in VS Code's ply-visualizer extension)."""
     path = Path(path)
     path.parent.mkdir(parents=True, exist_ok=True)
-    with open(path, "w") as f:
-        f.write("ply\nformat ascii 1.0\n")
-        f.write(f"element vertex {len(points)}\n")
-        f.write("property float x\nproperty float y\nproperty float z\n")
-        f.write("property uchar red\nproperty uchar green\nproperty uchar blue\n")
-        f.write("end_header\n")
-        for point, color in zip(points, colors):
-            gray = int(color)
-            f.write(f"{point[0]:.4f} {point[1]:.4f} {point[2]:.4f} {gray} {gray} {gray}\n")
+    n = len(points)
+    header = (
+        "ply\n"
+        "format binary_little_endian 1.0\n"
+        f"element vertex {n}\n"
+        "property float x\n"
+        "property float y\n"
+        "property float z\n"
+        "property uchar red\n"
+        "property uchar green\n"
+        "property uchar blue\n"
+        "end_header\n"
+    ).encode("ascii")
+    pts = np.asarray(points, dtype=np.float32)
+    # colors is grayscale intensity from the left white image → replicate to RGB
+    gray = np.clip(np.asarray(colors, dtype=np.float64), 0, 255).astype(np.uint8)
+    record = np.zeros(n, dtype=[("x", "<f4"), ("y", "<f4"), ("z", "<f4"),
+                                  ("r", "u1"), ("g", "u1"), ("b", "u1")])
+    record["x"] = pts[:, 0]
+    record["y"] = pts[:, 1]
+    record["z"] = pts[:, 2]
+    record["r"] = gray
+    record["g"] = gray
+    record["b"] = gray
+    with open(path, "wb") as f:
+        f.write(header)
+        f.write(record.tobytes())
 
 
 def fit_plane_svd(points):
@@ -192,27 +219,53 @@ def fit_plane_svd(points):
     return centroid, normal, distances
 
 
-def robust_plane_filter(points, colors, threshold_mm, iterations=3):
+def robust_plane_filter_mask(points, threshold_mm):
     if threshold_mm <= 0 or len(points) < 100:
-        return points, colors
+        return np.ones(len(points), dtype=bool)
 
-    keep = np.ones(len(points), dtype=bool)
-    for _ in range(iterations):
-        if keep.sum() < 100:
-            break
-        _, _, distances = fit_plane_svd(points[keep])
-        candidate_indices = np.flatnonzero(keep)
-        residual_keep = np.abs(distances) <= threshold_mm
-        new_keep = np.zeros_like(keep)
-        new_keep[candidate_indices[residual_keep]] = True
-        if new_keep.sum() == keep.sum():
-            keep = new_keep
-            break
-        keep = new_keep
+    active_idx = np.arange(len(points))
+    thresholds = np.geomspace(5.0, threshold_mm, 6)
+    
+    def fit_quad(p):
+        x, y, z = p[:, 0], p[:, 1], p[:, 2]
+        A = np.column_stack([x**2, y**2, x*y, x, y, np.ones_like(x)])
+        model, _, _, _ = np.linalg.lstsq(A, z, rcond=None)
+        return model
 
-    removed = len(points) - int(keep.sum())
-    print(f"Plane filter: kept {int(keep.sum())}/{len(points)} points, removed {removed}")
-    return points[keep], colors[keep]
+    for thresh in thresholds:
+        if len(active_idx) < 100:
+            break
+        samp_pts = points[active_idx]
+        samp = samp_pts[np.random.choice(len(samp_pts), min(30000, len(samp_pts)), replace=False)]
+        model = fit_quad(samp)
+        
+        x, y = samp_pts[:, 0], samp_pts[:, 1]
+        A = np.column_stack([x**2, y**2, x*y, x, y, np.ones_like(x)])
+        z_pred = A @ model
+        d = np.abs(samp_pts[:, 2] - z_pred)
+        active_idx = active_idx[d <= thresh]
+    
+    for _ in range(3):
+        if len(active_idx) < 100:
+            break
+        samp_pts = points[active_idx]
+        samp = samp_pts[np.random.choice(len(samp_pts), min(30000, len(samp_pts)), replace=False)]
+        model = fit_quad(samp)
+        
+        x, y = samp_pts[:, 0], samp_pts[:, 1]
+        A = np.column_stack([x**2, y**2, x*y, x, y, np.ones_like(x)])
+        z_pred = A @ model
+        d = np.abs(samp_pts[:, 2] - z_pred)
+        keep = d <= threshold_mm
+        if keep.sum() == len(active_idx):
+            break
+        active_idx = active_idx[keep]
+
+    removed = len(points) - len(active_idx)
+    print(f"Surface filter (quadratic): kept {len(active_idx)}/{len(points)} points, removed {removed} (threshold: {threshold_mm}mm)")
+    mask = np.zeros(len(points), dtype=bool)
+    mask[active_idx] = True
+    return mask
 
 
 def main():
@@ -352,36 +405,56 @@ def main():
         disparity,
         args.median_filter,
         args.max_median_diff,
-        args.min_component_area,
+        0, # min_component_area is done later
     )
     removed = int(mask.sum() - filtered_mask.sum())
     mask = filtered_mask
     print(
-        f"Filtered disparity: {int(mask.sum())} / {mask.size} "
+        f"Filtered disparity (median): {int(mask.sum())} / {mask.size} "
         f"({mask.mean() * 100:.1f}%), removed {removed}"
     )
 
     print("Reprojecting to 3D...")
     pointcloud = cv2.reprojectImageTo3D(disparity, Q, handleMissingValues=True)
+    
+    ys, xs = np.where(mask)
+    z = pointcloud[ys, xs, 2]
+    valid_3d = np.isfinite(pointcloud[ys, xs]).all(axis=1) & (z >= args.min_depth) & (z <= args.max_depth)
+    points = pointcloud[ys[valid_3d], xs[valid_3d]]
+    print(f"Depth filter: kept {len(points)} points in [{args.min_depth:g}, {args.max_depth:g}] mm")
+
+    # Use the tight plane filter to shatter the noise cloud in 2D.
+    # The true surface will remain a dense, connected blob.
+    plane_keep = robust_plane_filter_mask(points, args.plane_filter_mm)
+    
+    final_mask = np.zeros_like(mask)
+    final_mask[ys[valid_3d][plane_keep], xs[valid_3d][plane_keep]] = True
+    
+    # This will wipe out the now-disconnected noise islands
+    mask = filter_mask(final_mask, disparity, 0, 0, args.min_component_area)
+    print(f"Final connected components filter: kept {int(mask.sum())} points")
+
     points = pointcloud[mask]
     colors = white_images[0][mask]
 
-    z = points[:, 2]
-    finite_before_depth = np.isfinite(points).all(axis=1)
-    if finite_before_depth.any():
-        print(
-            "Raw depth percentiles before filter:",
-            np.percentile(points[finite_before_depth, 2], [1, 5, 50, 95, 99]),
-        )
-    keep = np.isfinite(points).all(axis=1) & (z >= args.min_depth) & (z <= args.max_depth)
-    points = points[keep]
-    colors = colors[keep]
-    print(f"Depth filter: kept {len(points)} points in [{args.min_depth:g}, {args.max_depth:g}] mm")
-
-    points, colors = robust_plane_filter(points, colors, args.plane_filter_mm)
-
     if len(points):
-        print("Depth percentiles:", np.percentile(points[:, 2], [1, 5, 50, 95, 99]))
+        print("Depth percentiles before unbow:", np.percentile(points[:, 2], [1, 5, 50, 95, 99]))
+        
+        # SVR roughness calculation uses a flat plane (PCA) for form removal,
+        # which fails when the coupon has macroscopic bowing (e.g., 2mm across).
+        # We un-bow the point cloud here by subtracting only the 2nd-order terms.
+        def fit_quad(p):
+            x, y, z = p[:, 0], p[:, 1], p[:, 2]
+            A = np.column_stack([x**2, y**2, x*y, x, y, np.ones_like(x)])
+            model, _, _, _ = np.linalg.lstsq(A, z, rcond=None)
+            return model
+            
+        model = fit_quad(points)
+        x, y = points[:, 0], points[:, 1]
+        z_bow = model[0]*x**2 + model[1]*y**2 + model[2]*x*y
+        points[:, 2] -= z_bow
+        print("Unbowed macroscopic curvature to prevent SVR edge effects.")
+        
     print(f"Writing {len(points)} points to {out_path}")
 
     write_ply(str(out_path), points, colors)

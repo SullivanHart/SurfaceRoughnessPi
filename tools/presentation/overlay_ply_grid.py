@@ -50,12 +50,14 @@ def parse_args():
     return parser.parse_args()
 
 
-def read_ascii_ply(path):
+def read_ply(path):
+    """Read a PLY file (ASCII or binary little-endian) and return header lines, property names, and float64 data array."""
     header = []
     vertex_count = None
     properties = []
-    with open(path) as f:
-        first = f.readline().rstrip("\n")
+    is_binary = False
+    with open(path, "rb") as f:
+        first = f.readline().rstrip(b"\n").decode("ascii")
         if first != "ply":
             raise ValueError(f"{path} is not a PLY file")
         header.append(first)
@@ -63,9 +65,11 @@ def read_ascii_ply(path):
             line = f.readline()
             if not line:
                 raise ValueError("PLY header ended unexpectedly")
-            stripped = line.rstrip("\n")
+            stripped = line.rstrip(b"\n").decode("ascii")
             header.append(stripped)
-            if stripped.startswith("element vertex"):
+            if stripped.startswith("format binary"):
+                is_binary = True
+            elif stripped.startswith("element vertex"):
                 vertex_count = int(stripped.split()[-1])
             elif stripped.startswith("property ") and vertex_count is not None:
                 properties.append(stripped.split()[-1])
@@ -73,10 +77,67 @@ def read_ascii_ply(path):
                 break
         if vertex_count is None:
             raise ValueError("PLY vertex count not found")
-        data = np.loadtxt(f, max_rows=vertex_count, dtype=np.float64)
+
+        if is_binary:
+            # Build numpy dtype from properties
+            type_map = {"x": "<f4", "y": "<f4", "z": "<f4",
+                        "red": "u1", "green": "u1", "blue": "u1",
+                        "nx": "<f4", "ny": "<f4", "nz": "<f4"}
+            dtype_fields = [(p, type_map.get(p.lower(), "<f4")) for p in properties]
+            raw = np.frombuffer(f.read(vertex_count * np.dtype(dtype_fields).itemsize),
+                                dtype=dtype_fields)
+            data = np.column_stack([raw[p].astype(np.float64) for p, _ in dtype_fields])
+        else:
+            data = np.loadtxt(f, max_rows=vertex_count, dtype=np.float64)
+
     if data.ndim == 1:
         data = data.reshape(1, -1)
     return header, properties, data
+
+
+# Alias kept for internal callers
+read_ascii_ply = read_ply
+
+
+def write_binary_ply(path, header, properties, data):
+    """Write a binary little-endian PLY (3× smaller than ASCII; loads via the
+    reliable transfer-via-fetch path in VS Code's ply-visualizer extension)."""
+    idx = property_indices(properties)
+    rgb_cols = {idx["red"], idx["green"], idx["blue"]}
+    xyz_cols = {idx["x"], idx["y"], idx["z"]}
+
+    n = len(data)
+    # Build binary header (replace any existing format line)
+    bin_header_lines = []
+    for line in header:
+        if line.startswith("format "):
+            bin_header_lines.append("format binary_little_endian 1.0")
+        else:
+            bin_header_lines.append(line)
+    header_bytes = ("\n".join(bin_header_lines) + "\n").encode("ascii")
+
+    # Build structured array
+    dtype_fields = []
+    for p in properties:
+        if p.lower() in ("red", "green", "blue"):
+            dtype_fields.append((p, "u1"))
+        else:
+            dtype_fields.append((p, "<f4"))
+    record = np.zeros(n, dtype=dtype_fields)
+    for i, p in enumerate(properties):
+        col = data[:, i]
+        if p.lower() in ("red", "green", "blue"):
+            record[p] = np.clip(np.round(col), 0, 255).astype(np.uint8)
+        else:
+            record[p] = col.astype(np.float32)
+
+    with open(path, "wb") as f:
+        f.write(header_bytes)
+        f.write(record.tobytes())
+
+
+# Alias kept for internal callers
+write_ascii_ply = write_binary_ply
 
 
 def ensure_rgb_properties(header, properties, data):
