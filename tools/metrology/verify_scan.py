@@ -1,0 +1,490 @@
+from __future__ import annotations
+
+import argparse
+import json
+import math
+import sys
+from pathlib import Path
+from typing import NamedTuple
+
+import numpy as np
+from scipy.spatial import cKDTree
+
+from svr_roughness import RoughnessConfig, analyze_points, load_points
+from svr_roughness.result import RoughnessResult
+
+
+class DeviationStats(NamedTuple):
+    mean_um: float
+    median_um: float
+    std_um: float
+    rms_um: float
+    p05_um: float
+    p25_um: float
+    p75_um: float
+    p95_um: float
+
+
+def fit_plane_svd(pts: np.ndarray) -> tuple[np.ndarray, np.ndarray]:
+    """Fit a plane through 3D points using SVD."""
+    centroid = np.mean(pts, axis=0)
+    shifted = pts - centroid
+    _, _, vh = np.linalg.svd(shifted, full_matrices=False)
+    normal = vh[2]
+    if normal[2] < 0:
+        normal = -normal
+    return centroid, normal
+
+
+def align_to_z(pts: np.ndarray) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
+    """Rotate points so dominant plane normal points along +Z."""
+    centroid, normal = fit_plane_svd(pts)
+    z_axis = np.array([0.0, 0.0, 1.0])
+    v = np.cross(normal, z_axis)
+    s = np.linalg.norm(v)
+    c = float(np.dot(normal, z_axis))
+    if s < 1e-8:
+        R = np.eye(3) if c > 0 else np.diag([1.0, -1.0, -1.0])
+    else:
+        vx = np.array([[0, -v[2], v[1]], [v[2], 0, -v[0]], [-v[1], v[0], 0]])
+        R = np.eye(3) + vx + (vx @ vx) * ((1.0 - c) / (s**2))
+    rot_pts = (pts - centroid) @ R.T
+    return rot_pts, R, centroid
+
+
+def voxel_downsample_fast(pts: np.ndarray, leaf_size: float) -> np.ndarray:
+    """Quick grid voxel downsampling using integer voxel keys."""
+    if len(pts) == 0:
+        return pts
+    voxel_coords = np.floor(pts / leaf_size).astype(np.int64)
+    packed = np.ascontiguousarray(voxel_coords).view(
+        np.dtype((np.void, voxel_coords.dtype.itemsize * 3))
+    )
+    _, idx = np.unique(packed, return_index=True)
+    return pts[idx]
+
+
+def make_elevation_feature_map(
+    pts: np.ndarray, pitch: float = 0.5
+) -> tuple[np.ndarray, np.ndarray, tuple[float, float]]:
+    """Rasterize points to a high-pass filtered elevation map for 2D cross-correlation."""
+    import cv2
+
+    x_min, y_min = pts[:, 0].min(), pts[:, 1].min()
+    x_max, y_max = pts[:, 0].max(), pts[:, 1].max()
+    nx = int(np.ceil((x_max - x_min) / pitch)) + 1
+    ny = int(np.ceil((y_max - y_min) / pitch)) + 1
+    grid = np.full((ny, nx), np.nan, dtype=np.float32)
+    ix = np.clip(((pts[:, 0] - x_min) / pitch).astype(int), 0, nx - 1)
+    iy = np.clip(((pts[:, 1] - y_min) / pitch).astype(int), 0, ny - 1)
+
+    flat_idx = iy * nx + ix
+    order = np.argsort(flat_idx)
+    sorted_idx = flat_idx[order]
+    sorted_z = pts[:, 2][order]
+    unq, start = np.unique(sorted_idx, return_index=True)
+    counts = np.diff(np.append(start, len(sorted_idx)))
+    sums = np.add.reduceat(sorted_z, start)
+    u_iy, u_ix = np.unravel_index(unq, (ny, nx))
+    grid[u_iy, u_ix] = sums / counts
+
+    mask = np.isfinite(grid)
+    mean_z = np.nanmean(grid)
+    feat = np.where(mask, grid - mean_z, 0.0).astype(np.float32)
+    # High-pass filter: subtract broad spatial trend to accentuate surface asperities
+    blur = cv2.GaussianBlur(feat, (25, 25), 5.0)
+    feat = feat - blur
+    feat[~mask] = 0.0
+    return feat, mask, (float(x_min), float(y_min))
+
+
+def coarse_align_2d(
+    ref_pts: np.ndarray, cap_pts: np.ndarray, pitch: float = 0.5, num_angles: int = 72
+) -> tuple[bool, float, tuple[float, float], float]:
+    """Finds best 2D rotation and translation via normalized cross-correlation."""
+    import cv2
+
+    feat_ref, _, orig_ref = make_elevation_feature_map(ref_pts, pitch)
+    feat_cap, _, orig_cap = make_elevation_feature_map(cap_pts, pitch)
+
+    best_score = -1.0
+    best_match = (False, 0.0, (0.0, 0.0), -1.0)
+
+    angles = np.linspace(0, 360, num_angles, endpoint=False)
+    h_c, w_c = feat_cap.shape
+    h_r, w_r = feat_ref.shape
+
+    for flip in (False, True):
+        for angle in angles:
+            M = cv2.getRotationMatrix2D((w_c / 2.0, h_c / 2.0), angle, 1.0)
+            rot_c = cv2.warpAffine(feat_cap, M, (w_c, h_c))
+            if flip:
+                rot_c = np.fliplr(rot_c)
+
+            if rot_c.shape[0] > h_r or rot_c.shape[1] > w_r:
+                continue
+
+            res = cv2.matchTemplate(feat_ref, rot_c, cv2.TM_CCOEFF_NORMED)
+            _, max_v, _, max_loc = cv2.minMaxLoc(res)
+            if max_v > best_score:
+                best_score = max_v
+                tx = orig_ref[0] + (max_loc[0] + w_c / 2.0) * pitch
+                ty = orig_ref[1] + (max_loc[1] + h_c / 2.0) * pitch
+                best_match = (flip, float(angle), (tx, ty), float(max_v))
+
+    return best_match
+
+
+def run_icp_3d(
+    source_pts: np.ndarray,
+    target_pts: np.ndarray,
+    max_iter: int = 50,
+    tolerance: float = 1e-5,
+    max_dist: float = 2.5,
+) -> tuple[np.ndarray, np.ndarray, np.ndarray, float]:
+    """Rigid 3D Iterative Closest Point (ICP) registration using KDTree and Kabsch SVD."""
+    tree = cKDTree(target_pts)
+    curr_pts = source_pts.copy()
+    total_R = np.eye(3)
+    total_t = np.zeros(3)
+    prev_error = float("inf")
+
+    for _ in range(max_iter):
+        dists, idxs = tree.query(curr_pts, k=1)
+        valid = dists < max_dist
+        if valid.sum() < 50:
+            break
+
+        src_valid = curr_pts[valid]
+        tgt_valid = target_pts[idxs[valid]]
+
+        curr_error = float(np.mean(dists[valid]))
+        if abs(prev_error - curr_error) < tolerance:
+            break
+        prev_error = curr_error
+
+        c_s = np.mean(src_valid, axis=0)
+        c_t = np.mean(tgt_valid, axis=0)
+        H = (src_valid - c_s).T @ (tgt_valid - c_t)
+        U, _, Vt = np.linalg.svd(H)
+        R_step = Vt.T @ U.T
+        if np.linalg.det(R_step) < 0:
+            Vt[-1, :] *= -1
+            R_step = Vt.T @ U.T
+        t_step = c_t - R_step @ c_s
+
+        curr_pts = (curr_pts @ R_step.T) + t_step
+        total_R = R_step @ total_R
+        total_t = R_step @ total_t + t_step
+
+    return curr_pts, total_R, total_t, prev_error
+
+
+def crop_reference_to_captured(
+    ref_pts: np.ndarray, cap_pts: np.ndarray, margin_mm: float = 0.8
+) -> np.ndarray:
+    """Crop the reference scan strictly within the 2D bounding footprint of the captured scan."""
+    cap_xy_tree = cKDTree(cap_pts[:, :2])
+    dists_2d, _ = cap_xy_tree.query(ref_pts[:, :2], k=1)
+    crop_mask = dists_2d <= margin_mm
+    return ref_pts[crop_mask]
+
+
+def compute_surface_deviations(
+    cap_pts: np.ndarray, ref_pts: np.ndarray, max_dist_mm: float = 2.0
+) -> DeviationStats:
+    """Computes point-to-point surface deviation statistics in micrometers."""
+    tree = cKDTree(ref_pts)
+    dists, idxs = tree.query(cap_pts, k=1)
+    valid = dists < max_dist_mm
+
+    signed_dz = (cap_pts[valid, 2] - ref_pts[idxs[valid], 2]) * 1000.0
+
+    mean_um = float(np.mean(signed_dz))
+    median_um = float(np.median(signed_dz))
+    std_um = float(np.std(signed_dz))
+    rms_um = float(np.sqrt(np.mean(signed_dz**2)))
+    p05, p25, p75, p95 = np.percentile(signed_dz, [5, 25, 75, 95])
+
+    return DeviationStats(
+        mean_um=mean_um,
+        median_um=median_um,
+        std_um=std_um,
+        rms_um=rms_um,
+        p05_um=float(p05),
+        p25_um=float(p25),
+        p75_um=float(p75),
+        p95_um=float(p95),
+    )
+
+
+def save_ply_binary(filepath: Path, points: np.ndarray) -> None:
+    """Save Nx3 float points into binary little-endian PLY."""
+    filepath = Path(filepath)
+    filepath.parent.mkdir(parents=True, exist_ok=True)
+    n = len(points)
+    header = (
+        "ply\n"
+        "format binary_little_endian 1.0\n"
+        f"element vertex {n}\n"
+        "property float x\nproperty float y\nproperty float z\n"
+        "end_header\n"
+    ).encode("ascii")
+    pts = np.asarray(points, dtype=np.float32)
+    with filepath.open("wb") as handle:
+        handle.write(header)
+        handle.write(pts.tobytes())
+
+
+def generate_verification_plot(
+    res_cap: RoughnessResult,
+    res_ref: RoughnessResult,
+    dev_stats: DeviationStats,
+    out_png: Path,
+) -> None:
+    """Generate a high-resolution 4-panel visual verification summary plot."""
+    try:
+        import matplotlib.pyplot as plt
+    except ImportError:
+        return
+
+    fig, axes = plt.subplots(2, 2, figsize=(14, 10), dpi=150)
+
+    # 1. Captured Elevation Grid
+    ax1 = axes[0, 0]
+    cap_z_um = res_cap.grid.filtered * 1000.0
+    im1 = ax1.imshow(cap_z_um, cmap="turbo", origin="lower")
+    ax1.set_title(f"Captured Surface (S_vr = {res_cap.svr_um:.1f} µm, NF = {res_cap.noise_floor_um:.1f} µm)")
+    ax1.set_xlabel("Grid X (0.2 mm cells)")
+    ax1.set_ylabel("Grid Y (0.2 mm cells)")
+    plt.colorbar(im1, ax=ax1, label="Roughness Elevation (µm)")
+
+    # 2. Reference Cropped Elevation Grid
+    ax2 = axes[0, 1]
+    ref_z_um = res_ref.grid.filtered * 1000.0
+    im2 = ax2.imshow(ref_z_um, cmap="turbo", origin="lower")
+    ax2.set_title(f"Reference Cropped (S_vr = {res_ref.svr_um:.1f} µm, NF = {res_ref.noise_floor_um:.1f} µm)")
+    ax2.set_xlabel("Grid X (0.2 mm cells)")
+    ax2.set_ylabel("Grid Y (0.2 mm cells)")
+    plt.colorbar(im2, ax=ax2, label="Roughness Elevation (µm)")
+
+    # 3. Variogram Curve Overlay
+    ax3 = axes[1, 0]
+    distances = np.arange(1, len(res_cap.variogram_bins_um) + 1) * 0.5
+    ax3.plot(distances, res_cap.variogram_bins_um, "r-o", label="Captured Scan", linewidth=2)
+    ax3.plot(distances, res_ref.variogram_bins_um, "b--s", label="Reference Cropped", linewidth=2)
+    ax3.set_title(f"ASTM WK92969 Variogram (ΔS_vr = {res_cap.svr_um - res_ref.svr_um:+.1f} µm)")
+    ax3.set_xlabel("Evaluation Distance (mm)")
+    ax3.set_ylabel("Roughness γ(d) (µm)")
+    ax3.grid(True, linestyle="--", alpha=0.6)
+    ax3.legend()
+
+    # 4. Surface Deviation Statistics
+    ax4 = axes[1, 1]
+    metrics = [
+        f"ASTM S_vr (Cap):    {res_cap.svr_um:.2f} µm",
+        f"ASTM S_vr (Ref):    {res_ref.svr_um:.2f} µm",
+        f"Delta S_vr:         {res_cap.svr_um - res_ref.svr_um:+.2f} µm ({((res_cap.svr_um - res_ref.svr_um)/res_ref.svr_um)*100:+.1f}%)",
+        "",
+        f"Sa (Cap / Ref):     {res_cap.sa_um:.1f} / {res_ref.sa_um:.1f} µm",
+        f"Sq (Cap / Ref):     {res_cap.sq_um:.1f} / {res_ref.sq_um:.1f} µm",
+        f"Noise Floor (Cap):  {res_cap.noise_floor_um:.2f} µm",
+        f"Noise Floor (Ref):  {res_ref.noise_floor_um:.2f} µm",
+        "",
+        f"Point-to-Point Deviation:",
+        f"  Mean Error:       {dev_stats.mean_um:+.2f} µm",
+        f"  Median Error:     {dev_stats.median_um:+.2f} µm",
+        f"  RMS Error:        {dev_stats.rms_um:.2f} µm",
+        f"  Std Deviation:    {dev_stats.std_um:.2f} µm",
+        f"  90% Interval:     [{dev_stats.p05_um:.1f}, {dev_stats.p95_um:.1f}] µm",
+    ]
+    ax4.text(
+        0.05,
+        0.95,
+        "\n".join(metrics),
+        transform=ax4.transAxes,
+        fontsize=11,
+        family="monospace",
+        verticalalignment="top",
+        bbox=dict(boxstyle="round", facecolor="wheat", alpha=0.3),
+    )
+    ax4.axis("off")
+    ax4.set_title("Metrology Agreement & Deviation Summary")
+
+    plt.tight_layout()
+    out_png.parent.mkdir(parents=True, exist_ok=True)
+    plt.savefig(out_png)
+    plt.close(fig)
+
+
+def verify_samples(
+    captured_path: str | Path,
+    reference_path: str | Path,
+    out_dir: str | Path | None = None,
+    grid_mm: float = 0.2,
+    short_cutoff_mm: float = 1.0,
+    long_cutoff_mm: float = 25.0,
+) -> dict:
+    """Execute complete automated registration, cropping, and dual ASTM roughness verification."""
+    cap_file = Path(captured_path)
+    ref_file = Path(reference_path)
+
+    print(f"Loading captured point cloud: {cap_file}...")
+    cap_raw = load_points(cap_file)
+    print(f"Loading reference point cloud: {ref_file}...")
+    ref_raw = load_points(ref_file)
+
+    print(f"Loaded: Captured={len(cap_raw):,} pts, Reference={len(ref_raw):,} pts")
+
+    # 1. Level planes to +Z
+    print("Leveling planes to +Z...")
+    ref_aligned, _, _ = align_to_z(ref_raw)
+    cap_aligned, _, _ = align_to_z(cap_raw)
+
+    # 2. Downsample for registration
+    ref_down = voxel_downsample_fast(ref_aligned, 0.5)
+    cap_down = voxel_downsample_fast(cap_aligned, 0.5)
+
+    # 3. Coarse 2D Alignment (search orientation & translation)
+    print("Performing multi-scale 2D orientation & translation search...")
+    flip, angle, loc, score = coarse_align_2d(ref_down, cap_down, pitch=0.5, num_angles=72)
+    print(f"Coarse 2D Match: flip={flip}, angle={angle:.1f} deg, translation=({loc[0]:.1f}, {loc[1]:.1f}) mm, score={score:.3f}")
+
+    # Apply coarse transform
+    cap_rough = cap_down.copy()
+    if flip:
+        cap_rough[:, 0] = -cap_rough[:, 0]
+    rad = np.radians(angle)
+    R_2d = np.array([
+        [np.cos(rad), -np.sin(rad), 0.0],
+        [np.sin(rad),  np.cos(rad), 0.0],
+        [0.0,          0.0,         1.0]
+    ])
+    cap_rough = cap_rough @ R_2d.T
+    t_2d = np.array([
+        loc[0] - np.mean(cap_rough[:, 0]),
+        loc[1] - np.mean(cap_rough[:, 1]),
+        np.median(ref_down[:, 2]) - np.median(cap_rough[:, 2])
+    ])
+    cap_rough += t_2d
+
+    # 4. Fine 3D ICP Registration
+    print("Refining alignment with 3D Iterative Closest Point (ICP)...")
+    cap_reg_down, R_icp, t_icp, icp_err = run_icp_3d(cap_rough, ref_down, max_iter=50, max_dist=2.5)
+    print(f"ICP converged: point-to-point residual = {icp_err * 1000.0:.1f} um")
+
+    # Transform full resolution captured points
+    cap_full = cap_aligned.copy()
+    if flip:
+        cap_full[:, 0] = -cap_full[:, 0]
+    cap_full = (cap_full @ R_2d.T + t_2d) @ R_icp.T + t_icp
+
+    # 5. Crop Reference Point Cloud to Captured Footprint
+    print("Cropping reference sample to captured spatial borders...")
+    ref_cropped = crop_reference_to_captured(ref_aligned, cap_full, margin_mm=0.8)
+    print(f"Reference points cropped from {len(ref_raw):,} to {len(ref_cropped):,} points")
+
+    # 6. Point-to-Point Surface Deviation
+    dev_stats = compute_surface_deviations(cap_full, ref_cropped)
+
+    # 7. Dual ASTM WK92969 Roughness Analysis
+    print("Running dual ASTM WK92969 analysis on both identical patches...")
+    cfg = RoughnessConfig(grid_mm=grid_mm, short_cutoff_mm=short_cutoff_mm, long_cutoff_mm=long_cutoff_mm)
+
+    res_cap = analyze_points(cap_full, cfg)
+    res_ref = analyze_points(ref_cropped, cfg)
+
+    delta_svr = res_cap.svr_um - res_ref.svr_um
+    pct_agreement = ((res_ref.svr_um - abs(delta_svr)) / res_ref.svr_um) * 100.0 if res_ref.svr_um > 0 else 0.0
+
+    # Print Formatted Report
+    print("\n" + "=" * 70)
+    print("       ASTM WK92969 IDENTICAL-SAMPLE VERIFICATION REPORT")
+    print("=" * 70)
+    print(f"{'Metric':<25} | {'Captured Scan':<16} | {'Reference Cropped':<16} | {'Delta':<10}")
+    print("-" * 70)
+    print(f"{'S_vr (ASTM Roughness)':<25} | {res_cap.svr_um:13.2f} um | {res_ref.svr_um:13.2f} um | {delta_svr:+7.2f} um")
+    print(f"{'Sa (Arithmetical Mean)':<25} | {res_cap.sa_um:13.2f} um | {res_ref.sa_um:13.2f} um | {res_cap.sa_um - res_ref.sa_um:+7.2f} um")
+    print(f"{'Sq (Root Mean Square)':<25} | {res_cap.sq_um:13.2f} um | {res_ref.sq_um:13.2f} um | {res_cap.sq_um - res_ref.sq_um:+7.2f} um")
+    print(f"{'Dynamic Noise Floor':<25} | {res_cap.noise_floor_um:13.2f} um | {res_ref.noise_floor_um:13.2f} um | {res_cap.noise_floor_um - res_ref.noise_floor_um:+7.2f} um")
+    print(f"{'Raw S_vr (Uncorrected)':<25} | {res_cap.svr_raw_um:13.2f} um | {res_ref.svr_raw_um:13.2f} um | {res_cap.svr_raw_um - res_ref.svr_raw_um:+7.2f} um")
+    print(f"{'Valid Points':<25} | {res_cap.points:13,d}    | {res_ref.points:13,d}    |")
+    print("-" * 70)
+    print(f"Metrology Agreement: {pct_agreement:.1f}%")
+    print(f"Surface Deviation:   Mean={dev_stats.mean_um:+.1f} um, RMS={dev_stats.rms_um:.1f} um, Std={dev_stats.std_um:.1f} um")
+    print("-" * 70)
+    print("Variogram Bins (Evaluation Length 0.5 to 5.0 mm):")
+    for b_idx in range(len(res_cap.variogram_bins_um)):
+        d_lo = b_idx * 0.5
+        d_hi = (b_idx + 1) * 0.5
+        v_cap = res_cap.variogram_bins_um[b_idx]
+        v_ref = res_ref.variogram_bins_um[b_idx]
+        diff = v_cap - v_ref
+        pct = (diff / v_ref) * 100 if v_ref > 0 else 0.0
+        print(f"  Bin {b_idx} ({d_lo:.1f}-{d_hi:.1f} mm): Cap={v_cap:6.2f} um | Ref={v_ref:6.2f} um | Delta={diff:+6.2f} um ({pct:+5.1f}%)")
+    print("=" * 70 + "\n")
+
+    summary_dict = {
+        "captured": {
+            "path": str(cap_file),
+            "points": int(res_cap.points),
+            "svr_um": float(res_cap.svr_um),
+            "sa_um": float(res_cap.sa_um),
+            "sq_um": float(res_cap.sq_um),
+            "noise_floor_um": float(res_cap.noise_floor_um),
+            "variogram_bins_um": [float(v) for v in res_cap.variogram_bins_um],
+        },
+        "reference_cropped": {
+            "path": str(ref_file),
+            "points": int(res_ref.points),
+            "svr_um": float(res_ref.svr_um),
+            "sa_um": float(res_ref.sa_um),
+            "sq_um": float(res_ref.sq_um),
+            "noise_floor_um": float(res_ref.noise_floor_um),
+            "variogram_bins_um": [float(v) for v in res_ref.variogram_bins_um],
+        },
+        "delta": {
+            "svr_um": float(delta_svr),
+            "agreement_pct": float(pct_agreement),
+            "deviation_mean_um": float(dev_stats.mean_um),
+            "deviation_rms_um": float(dev_stats.rms_um),
+            "deviation_std_um": float(dev_stats.std_um),
+        },
+    }
+
+    if out_dir:
+        od = Path(out_dir)
+        od.mkdir(parents=True, exist_ok=True)
+        save_ply_binary(od / "captured_aligned.ply", cap_full)
+        save_ply_binary(od / "reference_cropped.ply", ref_cropped)
+        (od / "verification_report.json").write_text(json.dumps(summary_dict, indent=2))
+        generate_verification_plot(res_cap, res_ref, dev_stats, od / "verification_comparison.png")
+        print(f"Exported aligned point clouds, JSON, and comparison plot to: {od}")
+
+    return summary_dict
+
+
+def main() -> None:
+    parser = argparse.ArgumentParser(
+        description="Verify portable scanner accuracy against reference point cloud by aligning, cropping, and dual ASTM analysis."
+    )
+    parser.add_argument("captured", help="Path to captured point cloud (.ply, .pcd, .stl, etc.)")
+    parser.add_argument("reference", help="Path to reference sample point cloud (.pcd, .ply, etc.)")
+    parser.add_argument("--out-dir", "-o", default=None, help="Directory to save aligned PLYs, JSON, and comparison plot")
+    parser.add_argument("--grid-mm", type=float, default=0.2, help="Grid cell size in mm (default: 0.2)")
+    parser.add_argument("--short-cutoff-mm", type=float, default=1.0, help="Short cutoff lambda_s in mm (default: 1.0)")
+    parser.add_argument("--long-cutoff-mm", type=float, default=25.0, help="Long cutoff lambda_c in mm (default: 25.0)")
+
+    args = parser.parse_args()
+    verify_samples(
+        args.captured,
+        args.reference,
+        out_dir=args.out_dir,
+        grid_mm=args.grid_mm,
+        short_cutoff_mm=args.short_cutoff_mm,
+        long_cutoff_mm=args.long_cutoff_mm,
+    )
+
+
+if __name__ == "__main__":
+    main()
