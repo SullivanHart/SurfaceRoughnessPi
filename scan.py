@@ -29,7 +29,7 @@ def project_path(value):
 
 
 parser = argparse.ArgumentParser()
-parser.add_argument("--brightness", type=int, default=45, metavar="0-255")
+parser.add_argument("--brightness", type=int, default=60, metavar="0-255")
 parser.add_argument("--exposure", type=int, default=350, metavar="US")
 parser.add_argument("--proj-pattern-ms", type=int, default=150,
                     help="Projector display exposure per pattern in milliseconds (default: 150ms -> 2.9s scan)")
@@ -57,8 +57,8 @@ parser.add_argument("--disparity-filter", choices=("bilateral", "median", "none"
                     help="Sub-pixel disparity edge-preserving smoothing filter to lower point cloud noise floor (default: bilateral)")
 parser.add_argument("--disparity-filter-radius", type=int, default=5,
                     help="Diameter of pixel neighborhood for disparity smoothing (default: 5)")
-parser.add_argument("--disparity-filter-sigma-color", type=float, default=0.25,
-                    help="Filter sigma in disparity space in pixels (default: 0.25 px)")
+parser.add_argument("--disparity-filter-sigma-color", type=float, default=0.30,
+                    help="Filter sigma in disparity space in pixels (default: 0.30 px)")
 parser.add_argument("--disparity-filter-sigma-space", type=float, default=1.5,
                     help="Filter sigma in coordinate space in pixels (default: 1.5 px)")
 parser.add_argument("--settle-delay", type=float, default=1.5,

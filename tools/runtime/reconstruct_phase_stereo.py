@@ -58,8 +58,8 @@ def parse_args():
                         help="Sub-pixel disparity edge-preserving smoothing filter (default: bilateral)")
     parser.add_argument("--disparity-filter-radius", type=int, default=5,
                         help="Diameter of pixel neighborhood for disparity smoothing (default: 5)")
-    parser.add_argument("--disparity-filter-sigma-color", type=float, default=0.25,
-                        help="Filter sigma in disparity space in pixels (default: 0.25 px)")
+    parser.add_argument("--disparity-filter-sigma-color", type=float, default=0.30,
+                        help="Filter sigma in disparity space in pixels (default: 0.30 px)")
     parser.add_argument("--disparity-filter-sigma-space", type=float, default=1.5,
                         help="Filter sigma in coordinate space in pixels (default: 1.5 px)")
     parser.add_argument("--roughness", action="store_true",
