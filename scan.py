@@ -65,7 +65,7 @@ parser.add_argument("--roughness-short-cutoff-mm", type=float, default=1.0)
 parser.add_argument("--roughness-long-cutoff-mm", type=float, default=25.0)
 parser.add_argument("--roughness-save-grid", default="output/roughness/latest_grid.npz")
 parser.add_argument("--roughness-metrics-out", default="output/roughness/latest_metrics.json")
-parser.add_argument("--inter-pattern-delay", type=float, default=0.10,
+parser.add_argument("--inter-pattern-delay", type=float, default=0.02,
                     help="Seconds to wait after each triggered pattern capture")
 parser.add_argument("--debug-reconstruction", action="store_true",
                     help="Write reconstruction debug images and bit contrast diagnostics")
@@ -710,6 +710,8 @@ def run_scan():
 
         saved_count = 0
         consecutive_failures = 0
+        buffered_pairs = []
+        t_burst_start = time.time()
 
         for slot_idx in range(PROJECTOR_SLOT_COUNT):
             if camera_left.IsCameraDeviceRemoved() or camera_right.IsCameraDeviceRemoved():
@@ -766,14 +768,9 @@ def run_scan():
                 if save_idx is not None:
                     img_left = converter_left.Convert(grab_left).GetArray()
                     img_right = converter_right.Convert(grab_right).GetArray()
+                    buffered_pairs.append((save_idx, img_left, img_right))
 
-                    file_left = CAPTURE_DIR_LEFT / f"left_{save_idx:02d}.png"
-                    file_right = CAPTURE_DIR_RIGHT / f"right_{save_idx:02d}.png"
-
-                    cv2.imwrite(str(file_left), img_left)
-                    cv2.imwrite(str(file_right), img_right)
-
-                    print(f"  Saved pair {save_idx:02d}")
+                    print(f"  Grabbed pair {save_idx:02d} (RAM buffer)")
                     saved_count += 1
                 else:
                     print(f"  Skipped slot {slot_idx:02d}")
@@ -797,6 +794,17 @@ def run_scan():
             grab_right.Release()
 
             time.sleep(INTER_PATTERN_DELAY_S)
+
+        t_burst_end = time.time()
+        print(f"\nOptical capture burst completed in {t_burst_end - t_burst_start:.2f}s ({saved_count}/{EXPECTED_CAPTURE_COUNT} frames in RAM)")
+
+        if buffered_pairs:
+            print(f"Flushing {len(buffered_pairs)} image pairs to disk...")
+            t_flush_start = time.time()
+            for s_idx, i_left, i_right in buffered_pairs:
+                cv2.imwrite(str(CAPTURE_DIR_LEFT / f"left_{s_idx:02d}.png"), i_left)
+                cv2.imwrite(str(CAPTURE_DIR_RIGHT / f"right_{s_idx:02d}.png"), i_right)
+            print(f"Disk write completed in {time.time() - t_flush_start:.2f}s")
 
         print(f"\nScan complete: {saved_count}/{EXPECTED_CAPTURE_COUNT} saved ({PROJECTOR_SLOT_COUNT} projector slots)")
         if saved_count == EXPECTED_CAPTURE_COUNT:
