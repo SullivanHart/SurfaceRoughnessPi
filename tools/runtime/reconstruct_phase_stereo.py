@@ -39,8 +39,8 @@ def parse_args():
     parser.add_argument("--period", type=int, default=16, help="Fringe period in projector pixels")
     parser.add_argument("--num-phases", type=int, default=8, help="Number of phase shift patterns (default: 8)")
     parser.add_argument("--gray-bits", type=int, default=5, help="Number of coarse Gray-code bits (default: 5)")
-    parser.add_argument("--min-mod", type=float, default=2.0, help="Minimum phase modulation threshold")
-    parser.add_argument("--min-contrast", type=float, default=5.0, help="Minimum white-black intensity contrast")
+    parser.add_argument("--min-mod", type=float, default=1.2, help="Minimum phase modulation threshold")
+    parser.add_argument("--min-contrast", type=float, default=2.0, help="Minimum white-black intensity contrast")
     parser.add_argument("--min-disparity", type=float, default=0.1, help="Minimum valid disparity in pixels")
     parser.add_argument("--max-disparity", type=float, default=2500.0, help="Maximum valid disparity in pixels")
     parser.add_argument("--disparity-sign", choices=("auto", "positive", "negative", "both"), default="auto",
@@ -132,8 +132,9 @@ def decode_camera_phase(images, num_phases, gray_bits, min_mod, min_contrast):
     modulation = (2.0 / num_phases) * np.sqrt(sin_sum**2 + cos_sum**2)
     contrast = white_img - black_img
 
-    # Valid mask based on modulation, contrast, and non-saturated white
-    valid_mask = (modulation >= min_mod) & (contrast >= min_contrast) & (white_img < 254)
+    # Valid mask based on modulation, contrast, and non-saturated sinusoidal frames
+    max_phase_val = np.max(np.stack(phase_imgs, axis=0), axis=0)
+    valid_mask = (modulation >= min_mod) & (contrast >= min_contrast) & (max_phase_val < 254)
 
     # 2. Coarse Gray code decoding for fringe order
     gray_word = np.zeros((H, W), dtype=np.int32)
