@@ -75,6 +75,7 @@ logs/
 # Generated 3D point cloud & mesh files
 *.ply
 *.pcd
+!data/reference/*.pcd
 *.stl
 *.obj
 *.off

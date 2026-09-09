@@ -73,8 +73,10 @@ parser.add_argument("--plane-filter-mm", type=float, default=2.0,
                     help="Keep points within this distance of a robust fitted plane in 3D (0 disables)")
 parser.add_argument("--roughness-out-ply", default="output/pointclouds/latest_roughness.ply",
                     help="Path to write colorized roughness PLY")
+parser.add_argument("--render-preview", action="store_true",
+                    help="Render 2D presentation PNG preview image via ply_to_png (disabled by default to allow immediate re-scanning)")
 parser.add_argument("--preview-out", default="output/pointclouds/latest_preview.png",
-                    help="Path to write live 2D preview image")
+                    help="Path to write live 2D preview image if --render-preview is enabled")
 parser.add_argument("--no-zero-disparity-rectify", action="store_true")
 parser.add_argument("--no-postprocess", action="store_true",
                     help="Only capture images; skip reconstruction and roughness analysis")
@@ -619,16 +621,17 @@ def run_postprocess():
             ]
             run_command("Generating colorized roughness point cloud", overlay_cmd)
 
-            render_cmd = [
-                sys.executable,
-                str(TOOLS_DIR / "presentation" / "ply_to_png.py"),
-                str(project_path(args.roughness_out_ply)),
-                "--color",
-                "ply",
-                "--out",
-                str(project_path(args.preview_out)),
-            ]
-            run_command("Generating live preview image", render_cmd)
+            if args.render_preview:
+                render_cmd = [
+                    sys.executable,
+                    str(TOOLS_DIR / "presentation" / "ply_to_png.py"),
+                    str(project_path(args.roughness_out_ply)),
+                    "--color",
+                    "ply",
+                    "--out",
+                    str(project_path(args.preview_out)),
+                ]
+                run_command("Generating live preview image", render_cmd)
         except Exception as e:
             print(f"Warning: could not generate roughness visual overlay / preview: {e}")
 

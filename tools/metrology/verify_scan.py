@@ -550,22 +550,132 @@ def verify_samples(
     return summary_dict
 
 
+BASE_DIR = Path(__file__).resolve().parents[2]
+REFERENCE_DIR = BASE_DIR / "data" / "reference"
+DEFAULT_CAPTURED = BASE_DIR / "output" / "pointclouds" / "latest.ply"
+
+SCRATA_SAMPLES = {
+    "a1": "SCRATA_A1.pcd",
+    "a2": "SCRATA_A2.pcd",
+    "a3": "SCRATA_A3.pcd",
+    "a4": "SCRATA_A4.pcd",
+    "1": "SCRATA_A1.pcd",
+    "2": "SCRATA_A2.pcd",
+    "3": "SCRATA_A3.pcd",
+    "4": "SCRATA_A4.pcd",
+    "scrata_a1": "SCRATA_A1.pcd",
+    "scrata_a2": "SCRATA_A2.pcd",
+    "scrata_a3": "SCRATA_A3.pcd",
+    "scrata_a4": "SCRATA_A4.pcd",
+}
+
+
 def main() -> None:
     parser = argparse.ArgumentParser(
         description="Verify portable scanner accuracy against reference point cloud by aligning, cropping, and dual ASTM analysis."
     )
-    parser.add_argument("captured", help="Path to captured point cloud (.ply, .pcd, .stl, etc.)")
-    parser.add_argument("reference", help="Path to reference sample point cloud (.pcd, .ply, etc.)")
+    parser.add_argument(
+        "arg1",
+        nargs="?",
+        default=None,
+        help="SCRATA sample (A1, A2, A3, A4) or path to captured point cloud (.ply, .pcd). Defaults to A4 if omitted.",
+    )
+    parser.add_argument(
+        "arg2",
+        nargs="?",
+        default=None,
+        help="SCRATA sample (A1, A2, A3, A4) or path to reference point cloud (.pcd, .ply).",
+    )
+    parser.add_argument(
+        "--sample",
+        "-s",
+        choices=["A1", "A2", "A3", "A4", "a1", "a2", "a3", "a4"],
+        default=None,
+        help="Reference SCRATA sample name (A1-A4). Defaults to A4.",
+    )
+    parser.add_argument(
+        "--captured",
+        "-c",
+        default=None,
+        help="Path to captured point cloud (defaults to output/pointclouds/latest.ply).",
+    )
+    parser.add_argument(
+        "--reference",
+        "-r",
+        default=None,
+        help="Path to reference sample point cloud (defaults to data/reference/SCRATA_<sample>.pcd).",
+    )
     parser.add_argument("--out-dir", "-o", default=None, help="Directory to save aligned PLYs, JSON, and comparison plot")
     parser.add_argument("--grid-mm", type=float, default=0.2, help="Grid cell size in mm (default: 0.2)")
     parser.add_argument("--short-cutoff-mm", type=float, default=1.0, help="Short cutoff lambda_s in mm (default: 1.0)")
     parser.add_argument("--long-cutoff-mm", type=float, default=25.0, help="Long cutoff lambda_c in mm (default: 25.0)")
 
     args = parser.parse_args()
+
+    # 1. Resolve Reference Sample / Path
+    ref_path: Path | None = None
+    sample_key: str = "a4"
+
+    if args.reference:
+        ref_path = Path(args.reference)
+    elif args.sample:
+        sample_key = args.sample.lower()
+        ref_path = REFERENCE_DIR / SCRATA_SAMPLES[sample_key]
+    elif args.arg2:
+        if args.arg2.lower() in SCRATA_SAMPLES:
+            sample_key = args.arg2.lower()
+            ref_path = REFERENCE_DIR / SCRATA_SAMPLES[sample_key]
+        else:
+            ref_path = Path(args.arg2)
+    elif args.arg1 and args.arg1.lower() in SCRATA_SAMPLES:
+        sample_key = args.arg1.lower()
+        ref_path = REFERENCE_DIR / SCRATA_SAMPLES[sample_key]
+    else:
+        sample_key = "a4"
+        ref_path = REFERENCE_DIR / SCRATA_SAMPLES[sample_key]
+
+    # 2. Resolve Captured Scan Path
+    cap_path: Path | None = None
+    if args.captured:
+        cap_path = Path(args.captured)
+    elif args.arg1 and args.arg1.lower() not in SCRATA_SAMPLES:
+        cap_path = Path(args.arg1)
+    else:
+        cap_path = DEFAULT_CAPTURED
+
+    if not cap_path.exists():
+        # Fallback to check example_files if latest.ply doesn't exist yet
+        alt_example = BASE_DIR.parent / "svr-roughness" / "example_files" / f"scanner_SCRATA_{sample_key.upper()}_v3.ply"
+        if alt_example.exists():
+            cap_path = alt_example
+        else:
+            raise FileNotFoundError(
+                f"Captured point cloud not found at '{cap_path}'. "
+                f"Run a scan first or specify captured scan path explicitly."
+            )
+
+    if not ref_path.exists():
+        # Also check SurfInspect/TestFiles as fallback if reference dir is missing
+        alt_ref = BASE_DIR.parent / "SurfInspect" / "TestFiles" / SCRATA_SAMPLES.get(sample_key, "SCRATA_A4.pcd")
+        if alt_ref.exists():
+            ref_path = alt_ref
+        else:
+            raise FileNotFoundError(f"Reference point cloud not found at '{ref_path}'.")
+
+    # Default out_dir if not specified
+    out_dir = args.out_dir
+    if not out_dir:
+        sample_tag = sample_key.lower() if sample_key in SCRATA_SAMPLES else "sample"
+        out_dir = BASE_DIR / "output" / f"verification_{sample_tag}"
+
+    print(f"Captured Scan:    {cap_path}")
+    print(f"Reference Scan:   {ref_path}")
+    print(f"Output Directory: {out_dir}")
+
     verify_samples(
-        args.captured,
-        args.reference,
-        out_dir=args.out_dir,
+        cap_path,
+        ref_path,
+        out_dir=out_dir,
         grid_mm=args.grid_mm,
         short_cutoff_mm=args.short_cutoff_mm,
         long_cutoff_mm=args.long_cutoff_mm,
