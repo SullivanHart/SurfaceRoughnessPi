@@ -455,115 +455,123 @@ def evaluate_calibration(final=False):
     return False
 
 
+capturing = False
+
+
 def capture_frame():
-    global frame_count, image_size
-    if not active:
+    global frame_count, image_size, capturing
+    if not active or capturing:
         return
-    print(f"\nCapturing frame {frame_count + 1}/{args.max_frames}")
-    flush_stale_frames(camera_left, "LEFT")
-    flush_stale_frames(camera_right, "RIGHT")
-    fire_trigger()
-
+    capturing = True
     try:
-        grab_l = camera_left.RetrieveResult(FRAME_TIMEOUT_MS, pylon.TimeoutHandling_ThrowException)
-        grab_r = camera_right.RetrieveResult(FRAME_TIMEOUT_MS, pylon.TimeoutHandling_ThrowException)
-    except Exception as e:
-        print(f"  TIMEOUT: {e}")
-        send_status("FRAME ERR")
-        return
+        print(f"\nCapturing frame {frame_count + 1}/{args.max_frames}")
+        flush_stale_frames(camera_left, "LEFT")
+        flush_stale_frames(camera_right, "RIGHT")
+        fire_trigger()
 
-    if not (grab_l.GrabSucceeded() and grab_r.GrabSucceeded()):
-        print("  Grab failed")
+        try:
+            grab_l = camera_left.RetrieveResult(FRAME_TIMEOUT_MS, pylon.TimeoutHandling_ThrowException)
+            grab_r = camera_right.RetrieveResult(FRAME_TIMEOUT_MS, pylon.TimeoutHandling_ThrowException)
+        except Exception as e:
+            print(f"  TIMEOUT: {e}")
+            send_status("FRAME ERR")
+            return
+
+        if not (grab_l.GrabSucceeded() and grab_r.GrabSucceeded()):
+            print("  Grab failed")
+            grab_l.Release()
+            grab_r.Release()
+            send_status("FRAME ERR")
+            return
+
+        img_l = converter_left.Convert(grab_l).GetArray()
+        img_r = converter_right.Convert(grab_r).GetArray()
         grab_l.Release()
         grab_r.Release()
-        send_status("FRAME ERR")
-        return
+        gray_l = cv2.cvtColor(img_l, cv2.COLOR_BGR2GRAY)
+        gray_r = cv2.cvtColor(img_r, cv2.COLOR_BGR2GRAY)
+        if image_size is None:
+            image_size = gray_l.shape[::-1]
 
-    img_l = converter_left.Convert(grab_l).GetArray()
-    img_r = converter_right.Convert(grab_r).GetArray()
-    grab_l.Release()
-    grab_r.Release()
-    gray_l = cv2.cvtColor(img_l, cv2.COLOR_BGR2GRAY)
-    gray_r = cv2.cvtColor(img_r, cv2.COLOR_BGR2GRAY)
-    if image_size is None:
-        image_size = gray_l.shape[::-1]
+        corners_l, ids_l, marker_corners_l, marker_ids_l = detect_charuco(gray_l)
+        corners_r, ids_r, marker_corners_r, marker_ids_r = detect_charuco(gray_r)
+        n_l = 0 if ids_l is None else len(ids_l)
+        n_r = 0 if ids_r is None else len(ids_r)
+        print(f"  ChArUco corners: L={n_l} R={n_r}")
 
-    corners_l, ids_l, marker_corners_l, marker_ids_l = detect_charuco(gray_l)
-    corners_r, ids_r, marker_corners_r, marker_ids_r = detect_charuco(gray_r)
-    n_l = 0 if ids_l is None else len(ids_l)
-    n_r = 0 if ids_r is None else len(ids_r)
-    print(f"  ChArUco corners: L={n_l} R={n_r}")
+        crop_l, roi_l = detection_roi(gray_l, corners_l, marker_corners_l)
+        crop_r, roi_r = detection_roi(gray_r, corners_r, marker_corners_r)
+        sharp_l = cv2.Laplacian(crop_l, cv2.CV_64F).var()
+        sharp_r = cv2.Laplacian(crop_r, cv2.CV_64F).var()
+        print(f"  Board brightness: L_mean={crop_l.mean():.1f} R_mean={crop_r.mean():.1f}")
+        print(f"  Board sharpness:  L={sharp_l:.1f} R={sharp_r:.1f}")
+        print(f"  Board ROI: L={roi_l} R={roi_r}")
 
-    crop_l, roi_l = detection_roi(gray_l, corners_l, marker_corners_l)
-    crop_r, roi_r = detection_roi(gray_r, corners_r, marker_corners_r)
-    sharp_l = cv2.Laplacian(crop_l, cv2.CV_64F).var()
-    sharp_r = cv2.Laplacian(crop_r, cv2.CV_64F).var()
-    print(f"  Board brightness: L_mean={crop_l.mean():.1f} R_mean={crop_r.mean():.1f}")
-    print(f"  Board sharpness:  L={sharp_l:.1f} R={sharp_r:.1f}")
-    print(f"  Board ROI: L={roi_l} R={roi_r}")
+        cv2.imwrite(str(DEBUG_DIR / "charuco_left.png"), draw_debug(img_l, corners_l, ids_l, marker_corners_l, marker_ids_l))
+        cv2.imwrite(str(DEBUG_DIR / "charuco_right.png"), draw_debug(img_r, corners_r, ids_r, marker_corners_r, marker_ids_r))
+        cv2.imwrite(str(DEBUG_DIR / "gray_left.png"), gray_l)
+        cv2.imwrite(str(DEBUG_DIR / "gray_right.png"), gray_r)
+        cv2.imwrite(str(DEBUG_DIR / "crop_left.png"), crop_l)
+        cv2.imwrite(str(DEBUG_DIR / "crop_right.png"), crop_r)
 
-    cv2.imwrite(str(DEBUG_DIR / "charuco_left.png"), draw_debug(img_l, corners_l, ids_l, marker_corners_l, marker_ids_l))
-    cv2.imwrite(str(DEBUG_DIR / "charuco_right.png"), draw_debug(img_r, corners_r, ids_r, marker_corners_r, marker_ids_r))
-    cv2.imwrite(str(DEBUG_DIR / "gray_left.png"), gray_l)
-    cv2.imwrite(str(DEBUG_DIR / "gray_right.png"), gray_r)
-    cv2.imwrite(str(DEBUG_DIR / "crop_left.png"), crop_l)
-    cv2.imwrite(str(DEBUG_DIR / "crop_right.png"), crop_r)
+        if ids_l is None or ids_r is None:
+            print("  -> No ChArUco corners found")
+            send_status("FRAME BAD")
+            return
+        if sharp_l < args.min_sharpness or sharp_r < args.min_sharpness:
+            print(f"  -> Need board sharpness at least {args.min_sharpness:.1f} in both cameras")
+            send_status("FRAME BAD")
+            return
 
-    if ids_l is None or ids_r is None:
-        print("  -> No ChArUco corners found")
-        send_status("FRAME BAD")
-        return
-    if sharp_l < args.min_sharpness or sharp_r < args.min_sharpness:
-        print(f"  -> Need board sharpness at least {args.min_sharpness:.1f} in both cameras")
-        send_status("FRAME BAD")
-        return
+        common, idx_l, idx_r = np.intersect1d(ids_l, ids_r, return_indices=True)
+        coverage_x, coverage_y = common_corner_quality(common)
+        print(f"  Common corners: {len(common)}  coverage: x={coverage_x:.2f} y={coverage_y:.2f}")
+        if len(common) < args.min_corners:
+            print(f"  -> Need at least {args.min_corners} common corners")
+            send_status("FRAME BAD")
+            return
+        if coverage_x < args.min_coverage_x or coverage_y < args.min_coverage_y:
+            print(
+                f"  -> Need coverage at least x={args.min_coverage_x:.2f} "
+                f"y={args.min_coverage_y:.2f}"
+            )
+            send_status("FRAME BAD")
+            return
 
-    common, idx_l, idx_r = np.intersect1d(ids_l, ids_r, return_indices=True)
-    coverage_x, coverage_y = common_corner_quality(common)
-    print(f"  Common corners: {len(common)}  coverage: x={coverage_x:.2f} y={coverage_y:.2f}")
-    if len(common) < args.min_corners:
-        print(f"  -> Need at least {args.min_corners} common corners")
-        send_status("FRAME BAD")
-        return
-    if coverage_x < args.min_coverage_x or coverage_y < args.min_coverage_y:
-        print(
-            f"  -> Need coverage at least x={args.min_coverage_x:.2f} "
-            f"y={args.min_coverage_y:.2f}"
+        objp = board_points[common].astype(np.float32)
+        pts_l = corners_l[idx_l].astype(np.float32)
+        pts_r = corners_r[idx_r].astype(np.float32)
+
+        tilt, pitch, yaw, dist_mm = estimate_board_pose(
+            objp, pts_l, image_size, best_calibration["mtx_l"] if best_calibration else None
         )
-        send_status("FRAME BAD")
-        return
+        tilt_tag = " (good tilt)" if tilt >= 15.0 else " (TIP: tilt board 15-30 deg)"
+        print(f"  Board pose: dist={dist_mm:.1f}mm tilt={tilt:.1f} deg [pitch={pitch:+.1f} deg, yaw={yaw:+.1f} deg]{tilt_tag}")
 
-    objp = board_points[common].astype(np.float32)
-    pts_l = corners_l[idx_l].astype(np.float32)
-    pts_r = corners_r[idx_r].astype(np.float32)
+        stored_objpoints.append(objp)
+        stored_pts_l.append(pts_l)
+        stored_pts_r.append(pts_r)
 
-    tilt, pitch, yaw, dist_mm = estimate_board_pose(
-        objp, pts_l, image_size, best_calibration["mtx_l"] if best_calibration else None
-    )
-    tilt_tag = " (good tilt)" if tilt >= 15.0 else " (TIP: tilt board 15-30 deg)"
-    print(f"  Board pose: dist={dist_mm:.1f}mm tilt={tilt:.1f} deg [pitch={pitch:+.1f} deg, yaw={yaw:+.1f} deg]{tilt_tag}")
+        idx = frame_count
+        cv2.imwrite(str(CALIB_DIR_LEFT / f"calib_{idx:02d}.png"), img_l)
+        cv2.imwrite(str(CALIB_DIR_RIGHT / f"calib_{idx:02d}.png"), img_r)
 
-    stored_objpoints.append(objp)
-    stored_pts_l.append(pts_l)
-    stored_pts_r.append(pts_r)
-
-    idx = frame_count
-    cv2.imwrite(str(CALIB_DIR_LEFT / f"calib_{idx:02d}.png"), img_l)
-    cv2.imwrite(str(CALIB_DIR_RIGHT / f"calib_{idx:02d}.png"), img_r)
-
-    frame_count += 1
-    print(f"  Saved ({frame_count}/{args.max_frames})")
-    send_status(f"FRAME {frame_count}/{args.max_frames}")
-    if frame_count >= args.max_frames:
-        finalize_calibration()
-    else:
-        evaluate_calibration()
+        frame_count += 1
+        print(f"  Saved ({frame_count}/{args.max_frames})")
+        send_status(f"FRAME {frame_count}/{args.max_frames}")
+        if frame_count >= args.max_frames:
+            finalize_calibration()
+        else:
+            evaluate_calibration()
+    finally:
+        capturing = False
 
 
 def finalize_calibration():
     global active
     if frame_count < min(args.min_frames, args.max_frames):
         print(f"Only {frame_count} frames; need at least {min(args.min_frames, args.max_frames)}")
+        send_status("CALIB_FAIL")
         return
     evaluate_calibration(final=True)
 
@@ -579,10 +587,15 @@ class CalibHandler(LineReader):
     def handle_line(self, line):
         line = line.strip()
         print(f"Serial: {line!r}")
-        if line == "TRIGGER":
+        if line in ("TRIGGER", "CALIB_TRIGGER"):
             capture_frame()
-        elif line == "CALIBRATE":
-            discard_and_exit()
+        elif line in ("CALIBRATE", "CALIB_OFF"):
+            if frame_count >= min(args.min_frames, args.max_frames):
+                finalize_calibration()
+            else:
+                discard_and_exit()
+        elif line == "CALIB_ON":
+            send_status("CALIB_MODE")
 
 
 clear_directory(CALIB_DIR_LEFT)

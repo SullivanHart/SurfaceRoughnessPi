@@ -386,10 +386,15 @@ class CalibHandler(LineReader):
     def handle_line(self, line):
         line = line.strip()
         print(f"Serial: {line!r}")
-        if line == "TRIGGER":
+        if line in ("TRIGGER", "CALIB_TRIGGER"):
             capture_frame()
-        elif line == "CALIBRATE":
-            discard_and_exit()
+        elif line in ("CALIBRATE", "CALIB_OFF"):
+            if calib_frame_count >= MIN_CALIB_FRAMES:
+                finalize_calibration()
+            else:
+                discard_and_exit()
+        elif line == "CALIB_ON":
+            send_status("CALIB_MODE")
 
 
 # -------------------------------
