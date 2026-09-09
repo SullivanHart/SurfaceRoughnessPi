@@ -31,8 +31,8 @@ def project_path(value):
 parser = argparse.ArgumentParser()
 parser.add_argument("--brightness", type=int, default=45, metavar="0-255")
 parser.add_argument("--exposure", type=int, default=350, metavar="US")
-parser.add_argument("--proj-pattern-ms", type=int, default=250,
-                    help="Projector display exposure per pattern in milliseconds (default: 250ms -> 5.0s scan)")
+parser.add_argument("--proj-pattern-ms", type=int, default=200,
+                    help="Projector display exposure per pattern in milliseconds (default: 200ms -> 3.9s scan)")
 parser.add_argument("--patterns", type=int, default=40, help="Number of scan patterns to capture")
 parser.add_argument("--out-dir", default="data/captures/latest", help="Directory to write captured left/ and right/ images")
 parser.add_argument("--calib", default="config/calibration.npz")
@@ -274,11 +274,11 @@ def run_roughness_analysis():
         print(f"Wrote metrics: {metrics_path}")
 
 
-def ensure_projector_scan():
+def ensure_projector_scan(force: bool = False):
     if args.legacy16:
         proj.start_scan16()
     else:
-        proj.start_scan(NUM_PATTERNS, exposure_ms=args.proj_pattern_ms)
+        proj.start_scan(NUM_PATTERNS, exposure_ms=args.proj_pattern_ms, force=force)
     proj.set_brightness(args.brightness)
 
 
@@ -703,7 +703,7 @@ def run_scan():
     scan_count += 1
 
     try:
-        ensure_projector_scan()
+        ensure_projector_scan(force=True)
         print(f"\n=== Starting scan {scan_count} ===")
 
         clear_directory(CAPTURE_DIR_LEFT)
