@@ -119,12 +119,15 @@ int main(int argc, char *argv[])
 
     // 3. Enter Programming Mode if not already in it
     uint16_t test_man_id = 0;
-    if (DLPC350_GetFlashManID(&test_man_id) < 0) {
+    if (DLPC350_GetFlashManID(&test_man_id) < 0 || test_man_id == 0) {
         fprintf(stdout, "Switching DLPC350 into bootloader programming mode...\n");
         DLPC350_EnterProgrammingMode();
-        fprintf(stdout, "Waiting for bootloader USB re-enumeration...\n");
-        usleep(1500000); // 1.5 seconds settle time
-        if (wait_for_usb_connection(10) < 0) {
+        DLPC350_USB_Close();
+
+        fprintf(stdout, "Waiting for bootloader USB re-enumeration (3s)...\n");
+        sleep(3); // Allow bootloader to reset USB and re-enumerate
+
+        if (wait_for_usb_connection(15) < 0) {
             fprintf(stderr, "ERROR: Failed to reconnect to bootloader after mode switch\n");
             free(file_buf);
             return 1;
@@ -133,10 +136,19 @@ int main(int argc, char *argv[])
         fprintf(stdout, "DLPC350 is already in bootloader programming mode.\n");
     }
 
-    // 4. Query Flash Hardware IDs
+    // 4. Query Flash Hardware IDs with retry
     uint16_t man_id = 0;
     unsigned long long dev_id = 0;
-    if (DLPC350_GetFlashManID(&man_id) < 0 || DLPC350_GetFlashDevID(&dev_id) < 0) {
+    bool id_ok = false;
+    for (int retry = 0; retry < 10; retry++) {
+        if (DLPC350_GetFlashManID(&man_id) == 0 && DLPC350_GetFlashDevID(&dev_id) == 0 && man_id != 0) {
+            id_ok = true;
+            break;
+        }
+        usleep(500000); // 500 ms
+    }
+
+    if (!id_ok) {
         fprintf(stderr, "WARNING: Could not query flash IDs (proceeding with standard flash type)\n");
     } else {
         fprintf(stdout, "Flash Manufacturer ID: 0x%04X, Device ID: 0x%04llX\n", man_id, dev_id & 0xFFFF);

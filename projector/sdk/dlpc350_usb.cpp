@@ -98,6 +98,7 @@ int DLPC350_USB_Write()
     if((bytesWritten = hid_write(DeviceHandle, g_OutputBuffer, USB_MIN_PACKET_SIZE+1)) == -1)
     {
         hid_close(DeviceHandle);
+        DeviceHandle = NULL;
         USBConnected = 0;
         return -1;
     }
@@ -118,6 +119,7 @@ int DLPC350_USB_Read()
     if((bytesRead = hid_read_timeout(DeviceHandle, g_InputBuffer, USB_MIN_PACKET_SIZE+1, 2000)) == -1)
     {
         hid_close(DeviceHandle);
+        DeviceHandle = NULL;
         USBConnected = 0;
         return -1;
     }
@@ -127,7 +129,11 @@ int DLPC350_USB_Read()
 
 int DLPC350_USB_Close()
 {
-    hid_close(DeviceHandle);
+    if(DeviceHandle != NULL)
+    {
+        hid_close(DeviceHandle);
+        DeviceHandle = NULL;
+    }
     USBConnected = 0;
 
     return 0;
