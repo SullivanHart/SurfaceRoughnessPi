@@ -1067,12 +1067,17 @@ def finalize_calibration():
         exit_calibration_mode()
         return
 
-    print(f"Calibrating on {len(objpoints)} valid frames...")
-    _, mtx_l, dist_l, _, _ = cv2.calibrateCamera(objpoints, imgpoints_l, img_shape, None, None)
-    _, mtx_r, dist_r, _, _ = cv2.calibrateCamera(objpoints, imgpoints_r, img_shape, None, None)
+    print(f"Calibrating on {len(objpoints)} valid frames (fixing k3=0)...")
+    _, mtx_l, dist_l, _, _ = cv2.calibrateCamera(
+        objpoints, imgpoints_l, img_shape, None, None, flags=cv2.CALIB_FIX_K3
+    )
+    _, mtx_r, dist_r, _, _ = cv2.calibrateCamera(
+        objpoints, imgpoints_r, img_shape, None, None, flags=cv2.CALIB_FIX_K3
+    )
     rms, _, _, _, _, R, T, E, F = cv2.stereoCalibrate(
         objpoints, imgpoints_l, imgpoints_r,
-        mtx_l, dist_l, mtx_r, dist_r, img_shape
+        mtx_l, dist_l, mtx_r, dist_r, img_shape,
+        flags=cv2.CALIB_FIX_INTRINSIC
     )
 
     print(f"Stereo RMS reprojection error: {rms:.4f} px")

@@ -12,14 +12,30 @@ from pathlib import Path
 
 import cv2
 import numpy as np
-import RPi.GPIO as GPIO
-import serial
-from pypylon import pylon
-from serial.threaded import LineReader, ReaderThread
+try:
+    import RPi.GPIO as GPIO
+except ImportError:
+    GPIO = None
+
+try:
+    import serial
+    from serial.threaded import LineReader, ReaderThread
+except ImportError:
+    serial = None
+    LineReader = object
+    ReaderThread = None
+
+try:
+    from pypylon import pylon
+except ImportError:
+    pylon = None
 
 BASE_DIR = Path(__file__).resolve().parents[2]
 sys.path.insert(0, str(BASE_DIR / "projector"))
-import projector as proj
+try:
+    import projector as proj
+except ImportError:
+    proj = None
 
 
 parser = argparse.ArgumentParser()
@@ -48,6 +64,12 @@ parser.add_argument("--min-coverage-y", type=float, default=0.55,
                     help="Minimum fraction of board height covered by common detected ChArUco corners")
 parser.add_argument("--out", default="config/calibration.npz",
                     help="Calibration file to write")
+parser.add_argument("--no-fix-k3", action="store_true",
+                    help="Do not fix k3=0 (default: k3 is fixed to 0 to prevent 6th-order edge curling)")
+parser.add_argument("--zero-tangent-dist", action="store_true",
+                    help="Force tangential distortion coefficients p1=p2=0")
+parser.add_argument("--rational-model", action="store_true",
+                    help="Enable rational polynomial distortion model (k4, k5, k6)")
 parser.add_argument("--image-dir", default="data/calibration",
                     help="Directory for accepted calibration image pairs")
 parser.add_argument("--debug-dir", default="data/calibration/debug",
@@ -258,10 +280,49 @@ def compute_rectified_y_error(calib):
     }
 
 
+def estimate_board_pose(
+    objp: np.ndarray, pts: np.ndarray, img_size: tuple[int, int], mtx: np.ndarray | None = None
+) -> tuple[float, float, float, float]:
+    """Estimate board orientation in degrees (total_tilt, pitch, yaw) and distance (mm)."""
+    w, h = img_size
+    if mtx is None:
+        f = max(w, h) * 1.3  # nominal focal length estimate ~2500 px
+        K = np.array([[f, 0.0, w / 2.0], [0.0, f, h / 2.0], [0.0, 0.0, 1.0]], dtype=np.float32)
+    else:
+        K = mtx
+    ok, rvec, tvec = cv2.solvePnP(objp, pts, K, None, flags=cv2.SOLVEPNP_ITERATIVE)
+    if not ok:
+        return 0.0, 0.0, 0.0, 0.0
+    R_mat, _ = cv2.Rodrigues(rvec)
+    normal = R_mat @ np.array([0.0, 0.0, 1.0])
+    pitch_deg = float(np.degrees(np.arcsin(np.clip(-normal[1], -1.0, 1.0))))
+    yaw_deg = float(np.degrees(np.arcsin(np.clip(normal[0], -1.0, 1.0))))
+    total_tilt = float(np.degrees(np.arccos(np.clip(normal[2], -1.0, 1.0))))
+    dist_mm = float(tvec[2, 0])
+    return total_tilt, pitch_deg, yaw_deg, dist_mm
+
+
 def compute_calibration():
-    print(f"\n=== Evaluating ChArUco stereo calibration from {frame_count} frames ===")
-    ret_l, mtx_l, dist_l, _, _ = cv2.calibrateCamera(stored_objpoints, stored_pts_l, image_size, None, None)
-    ret_r, mtx_r, dist_r, _, _ = cv2.calibrateCamera(stored_objpoints, stored_pts_r, image_size, None, None)
+    calib_flags = 0
+    flag_names = []
+    if not args.no_fix_k3:
+        calib_flags |= cv2.CALIB_FIX_K3
+        flag_names.append("CALIB_FIX_K3")
+    if args.zero_tangent_dist:
+        calib_flags |= cv2.CALIB_ZERO_TANGENT_DIST
+        flag_names.append("CALIB_ZERO_TANGENT_DIST")
+    if args.rational_model:
+        calib_flags |= cv2.CALIB_RATIONAL_MODEL
+        flag_names.append("CALIB_RATIONAL_MODEL")
+
+    flags_str = " | ".join(flag_names) if flag_names else "DEFAULT"
+    print(f"\n=== Evaluating ChArUco stereo calibration from {frame_count} frames (flags: {flags_str}) ===")
+    ret_l, mtx_l, dist_l, _, _ = cv2.calibrateCamera(
+        stored_objpoints, stored_pts_l, image_size, None, None, flags=calib_flags
+    )
+    ret_r, mtx_r, dist_r, _, _ = cv2.calibrateCamera(
+        stored_objpoints, stored_pts_r, image_size, None, None, flags=calib_flags
+    )
     rms, _, _, _, _, R, T, E, F = cv2.stereoCalibrate(
         stored_objpoints,
         stored_pts_l,
@@ -287,6 +348,7 @@ def compute_calibration():
         "F": F,
         "image_size": image_size,
         "frames": frame_count,
+        "calib_flags": calib_flags,
     }
     calib["y_error"] = compute_rectified_y_error(calib)
     return calib
@@ -335,7 +397,33 @@ def evaluate_calibration(final=False):
         "Rectified Y error: "
         f"mean={y['mean']:.4f}px p95={y['p95']:.4f}px max_frame_mean={y['max_frame_mean']:.4f}px"
     )
-    print(f"Translation T (mm): {calib['T'].ravel()}")
+    print(f"Translation T (mm): {calib['T'].ravel()}  baseline={float(np.linalg.norm(calib['T'])):.2f} mm")
+
+    dl = calib["dist_l"].ravel()
+    dr = calib["dist_r"].ravel()
+    k3_l = dl[4] if len(dl) > 4 else 0.0
+    k3_r = dr[4] if len(dr) > 4 else 0.0
+    print(f"Distortion L: k1={dl[0]:+.3e} k2={dl[1]:+.3e} p1={dl[2]:+.3e} p2={dl[3]:+.3e} k3={k3_l:+.3e}")
+    print(f"Distortion R: k1={dr[0]:+.3e} k2={dr[1]:+.3e} p1={dr[2]:+.3e} p2={dr[3]:+.3e} k3={k3_r:+.3e}")
+
+    # Calculate dataset diversity across stored frames
+    pitches, yaws, dists = [], [], []
+    for o, p in zip(stored_objpoints, stored_pts_l):
+        _, ptch, yw, d = estimate_board_pose(o, p, image_size, calib["mtx_l"])
+        pitches.append(ptch)
+        yaws.append(yw)
+        dists.append(d)
+
+    if pitches:
+        p_span = max(pitches) - min(pitches)
+        y_span = max(yaws) - min(yaws)
+        d_span = max(dists) - min(dists)
+        print(f"Pose diversity across {len(pitches)} frames:")
+        print(f"  Pitch: [{min(pitches):+5.1f}, {max(pitches):+5.1f}] deg (span: {p_span:4.1f} deg)")
+        print(f"  Yaw:   [{min(yaws):+5.1f}, {max(yaws):+5.1f}] deg (span: {y_span:4.1f} deg)")
+        print(f"  Depth: [{min(dists):5.1f}, {max(dists):5.1f}] mm  (span: {d_span:4.1f} mm)")
+        if p_span < 20.0 or y_span < 20.0:
+            print("  TIP: Tilt diversity is narrow (<20 deg). Add frames tilted 15-30 deg up/down and left/right to prevent optical bowl distortion!")
 
     score = (y["mean"], y["max_frame_mean"], calib["rms"])
     if best_score is None or score < best_score:
@@ -448,6 +536,12 @@ def capture_frame():
     objp = board_points[common].astype(np.float32)
     pts_l = corners_l[idx_l].astype(np.float32)
     pts_r = corners_r[idx_r].astype(np.float32)
+
+    tilt, pitch, yaw, dist_mm = estimate_board_pose(
+        objp, pts_l, image_size, best_calibration["mtx_l"] if best_calibration else None
+    )
+    tilt_tag = " (good tilt)" if tilt >= 15.0 else " (TIP: tilt board 15-30 deg)"
+    print(f"  Board pose: dist={dist_mm:.1f}mm tilt={tilt:.1f} deg [pitch={pitch:+.1f} deg, yaw={yaw:+.1f} deg]{tilt_tag}")
 
     stored_objpoints.append(objp)
     stored_pts_l.append(pts_l)
