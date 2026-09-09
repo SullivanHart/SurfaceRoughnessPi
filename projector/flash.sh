@@ -16,15 +16,38 @@ echo "=================================================="
 echo " Preparing DLPC350 Flasher"
 echo "=================================================="
 
-# Compile flash_firmware if binary does not exist
-if [ ! -f "${SCRIPT_DIR}/bin/flash_firmware" ]; then
+# Locate or compile flash_firmware
+BIN=""
+if [ -f "${SCRIPT_DIR}/bin/flash_firmware" ]; then
+    BIN="${SCRIPT_DIR}/bin/flash_firmware"
+elif [ -f "${SCRIPT_DIR}/build/bin/flash_firmware" ]; then
+    BIN="${SCRIPT_DIR}/build/bin/flash_firmware"
+elif [ -f "${SCRIPT_DIR}/build/flash_firmware" ]; then
+    BIN="${SCRIPT_DIR}/build/flash_firmware"
+else
     echo "Compiling flash_firmware..."
     mkdir -p "${SCRIPT_DIR}/build"
     cd "${SCRIPT_DIR}/build"
     cmake .. -DCMAKE_BUILD_TYPE=Release
     cmake --build . --target flash_firmware
     cd "${ROOT_DIR}"
+    if [ -f "${SCRIPT_DIR}/build/bin/flash_firmware" ]; then
+        BIN="${SCRIPT_DIR}/build/bin/flash_firmware"
+    elif [ -f "${SCRIPT_DIR}/build/flash_firmware" ]; then
+        BIN="${SCRIPT_DIR}/build/flash_firmware"
+    elif [ -f "${SCRIPT_DIR}/bin/flash_firmware" ]; then
+        BIN="${SCRIPT_DIR}/bin/flash_firmware"
+    fi
 fi
 
+if [ -z "${BIN}" ] || [ ! -f "${BIN}" ]; then
+    echo "ERROR: Could not find compiled flash_firmware binary!"
+    exit 1
+fi
+
+# Mirror into projector/bin for consistency
+mkdir -p "${SCRIPT_DIR}/bin"
+cp -f "${BIN}" "${SCRIPT_DIR}/bin/flash_firmware" 2>/dev/null || true
+
 echo "Target Firmware: ${FIRMWARE}"
-exec "${SCRIPT_DIR}/bin/flash_firmware" "${FIRMWARE}"
+exec "${BIN}" "${FIRMWARE}"
