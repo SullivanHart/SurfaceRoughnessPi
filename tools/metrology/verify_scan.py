@@ -11,6 +11,7 @@ import numpy as np
 from scipy.spatial import cKDTree
 
 from svr_roughness import RoughnessConfig, analyze_points, load_points
+from svr_roughness.algorithm import apply_dual_pass_gaussian_filter, pca_align_plane
 from svr_roughness.result import RoughnessResult
 
 
@@ -98,8 +99,39 @@ def make_elevation_feature_map(
     return feat, mask, (float(x_min), float(y_min))
 
 
+def raster_synchronized(
+    pts: np.ndarray,
+    x_min: float,
+    y_min: float,
+    nx: int,
+    ny: int,
+    pitch_mm: float = 0.2,
+    short_cutoff_mm: float = 1.0,
+    long_cutoff_mm: float = 25.0,
+) -> np.ndarray:
+    """Rasterize points onto a shared coordinate grid and apply dual-pass Gaussian filter."""
+    ix = np.clip(np.floor((pts[:, 0] - x_min) / pitch_mm).astype(int), 0, nx - 1)
+    iy = np.clip(np.floor((pts[:, 1] - y_min) / pitch_mm).astype(int), 0, ny - 1)
+    grid = np.full((ny, nx), np.nan, dtype=np.float64)
+    counts = np.zeros((ny, nx), dtype=int)
+    sums = np.zeros((ny, nx), dtype=float)
+    np.add.at(sums, (iy, ix), pts[:, 2])
+    np.add.at(counts, (iy, ix), 1)
+    mask = counts > 0
+    grid[mask] = sums[mask] / counts[mask]
+    mean_val = np.nanmean(grid)
+    filled = np.where(mask, grid, mean_val)
+    pitch_m = pitch_mm * 0.001
+    s_m = short_cutoff_mm * 0.001
+    l_m = long_cutoff_mm * 0.001
+    filt_m = apply_dual_pass_gaussian_filter(filled * 0.001, pitch_m, s_m, l_m)
+    out_um = filt_m * 1e6
+    out_um[~mask] = np.nan
+    return out_um
+
+
 def coarse_align_2d(
-    ref_pts: np.ndarray, cap_pts: np.ndarray, pitch: float = 0.5, num_angles: int = 72
+    ref_pts: np.ndarray, cap_pts: np.ndarray, pitch: float = 0.5, num_angles: int = 180
 ) -> tuple[bool, float, tuple[float, float], float]:
     """Finds best 2D rotation and translation via normalized cross-correlation."""
     import cv2
@@ -241,6 +273,9 @@ def generate_verification_plot(
     res_ref: RoughnessResult,
     dev_stats: DeviationStats,
     out_png: Path,
+    g_cap: np.ndarray | None = None,
+    g_ref: np.ndarray | None = None,
+    elevation_corr: float | None = None,
 ) -> None:
     """Generate a high-resolution 4-panel visual verification summary plot."""
     try:
@@ -252,17 +287,30 @@ def generate_verification_plot(
 
     # 1. Captured Elevation Grid
     ax1 = axes[0, 0]
-    cap_z_um = res_cap.grid.filtered * 1000.0
-    im1 = ax1.imshow(cap_z_um, cmap="turbo", origin="lower")
-    ax1.set_title(f"Captured Surface (S_vr = {res_cap.svr_um:.1f} µm, NF = {res_cap.noise_floor_um:.1f} µm)")
+    if g_cap is not None and g_ref is not None:
+        cap_z_um = g_cap
+        ref_z_um = g_ref
+        all_vals = np.concatenate([cap_z_um[np.isfinite(cap_z_um)], ref_z_um[np.isfinite(ref_z_um)]])
+        if len(all_vals) > 0:
+            vmax = float(np.nanpercentile(np.abs(all_vals), 99.5))
+            vmin = -vmax
+        else:
+            vmin, vmax = -400.0, 400.0
+    else:
+        cap_z_um = res_cap.grid.filtered * 1000.0
+        ref_z_um = res_ref.grid.filtered * 1000.0
+        vmin, vmax = None, None
+
+    im1 = ax1.imshow(cap_z_um, cmap="turbo", origin="lower", vmin=vmin, vmax=vmax)
+    corr_str = f", r = {elevation_corr:+.3f}" if elevation_corr is not None else ""
+    ax1.set_title(f"Captured Surface (S_vr = {res_cap.svr_um:.1f} µm, NF = {res_cap.noise_floor_um:.1f} µm{corr_str})")
     ax1.set_xlabel("Grid X (0.2 mm cells)")
     ax1.set_ylabel("Grid Y (0.2 mm cells)")
     plt.colorbar(im1, ax=ax1, label="Roughness Elevation (µm)")
 
     # 2. Reference Cropped Elevation Grid
     ax2 = axes[0, 1]
-    ref_z_um = res_ref.grid.filtered * 1000.0
-    im2 = ax2.imshow(ref_z_um, cmap="turbo", origin="lower")
+    im2 = ax2.imshow(ref_z_um, cmap="turbo", origin="lower", vmin=vmin, vmax=vmax)
     ax2.set_title(f"Reference Cropped (S_vr = {res_ref.svr_um:.1f} µm, NF = {res_ref.noise_floor_um:.1f} µm)")
     ax2.set_xlabel("Grid X (0.2 mm cells)")
     ax2.set_ylabel("Grid Y (0.2 mm cells)")
@@ -290,6 +338,7 @@ def generate_verification_plot(
         f"Sq (Cap / Ref):     {res_cap.sq_um:.1f} / {res_ref.sq_um:.1f} µm",
         f"Noise Floor (Cap):  {res_cap.noise_floor_um:.2f} µm",
         f"Noise Floor (Ref):  {res_ref.noise_floor_um:.2f} µm",
+        f"Height Correlation: {elevation_corr:+.3f}" if elevation_corr is not None else "",
         "",
         f"Point-to-Point Deviation:",
         f"  Mean Error:       {dev_stats.mean_um:+.2f} µm",
@@ -298,6 +347,7 @@ def generate_verification_plot(
         f"  Std Deviation:    {dev_stats.std_um:.2f} µm",
         f"  90% Interval:     [{dev_stats.p05_um:.1f}, {dev_stats.p95_um:.1f}] µm",
     ]
+    metrics = [m for m in metrics if m != ""]
     ax4.text(
         0.05,
         0.95,
@@ -341,13 +391,18 @@ def verify_samples(
     ref_aligned, _, _ = align_to_z(ref_raw)
     cap_aligned, _, _ = align_to_z(cap_raw)
 
+    is_cam = bool(np.mean(cap_raw[:, 2]) > 50.0)
+    if is_cam:
+        print("Detected camera coordinate system: converting distance to elevation (+Z = peaks)...")
+        cap_aligned[:, 2] = -cap_aligned[:, 2]
+
     # 2. Downsample for registration
     ref_down = voxel_downsample_fast(ref_aligned, 0.5)
     cap_down = voxel_downsample_fast(cap_aligned, 0.5)
 
     # 3. Coarse 2D Alignment (search orientation & translation)
     print("Performing multi-scale 2D orientation & translation search...")
-    flip, angle, loc, score = coarse_align_2d(ref_down, cap_down, pitch=0.5, num_angles=72)
+    flip, angle, loc, score = coarse_align_2d(ref_down, cap_down, pitch=0.5, num_angles=180)
     print(f"Coarse 2D Match: flip={flip}, angle={angle:.1f} deg, translation=({loc[0]:.1f}, {loc[1]:.1f}) mm, score={score:.3f}")
 
     # Apply coarse transform
@@ -387,7 +442,33 @@ def verify_samples(
     # 6. Point-to-Point Surface Deviation
     dev_stats = compute_surface_deviations(cap_full, ref_cropped)
 
-    # 7. Dual ASTM WK92969 Roughness Analysis
+    # 7. Shared PCA coordinate alignment for synchronized visualization
+    c_mid = ref_cropped.mean(axis=0)
+    _, _, eig_shared = pca_align_plane((ref_cropped - c_mid) * 0.001)
+    cap_pca = (cap_full - c_mid) @ eig_shared
+    ref_pca = (ref_cropped - c_mid) @ eig_shared
+
+    # Synchronized rasterization bounds
+    x_min = min(cap_pca[:, 0].min(), ref_pca[:, 0].min())
+    x_max = max(cap_pca[:, 0].max(), ref_pca[:, 0].max())
+    y_min = min(cap_pca[:, 1].min(), ref_pca[:, 1].min())
+    y_max = max(cap_pca[:, 1].max(), ref_pca[:, 1].max())
+    nx = int(np.ceil((x_max - x_min) / grid_mm)) + 1
+    ny = int(np.ceil((y_max - y_min) / grid_mm)) + 1
+
+    g_cap = raster_synchronized(
+        cap_pca, x_min, y_min, nx, ny, pitch_mm=grid_mm,
+        short_cutoff_mm=short_cutoff_mm, long_cutoff_mm=long_cutoff_mm,
+    )
+    g_ref = raster_synchronized(
+        ref_pca, x_min, y_min, nx, ny, pitch_mm=grid_mm,
+        short_cutoff_mm=short_cutoff_mm, long_cutoff_mm=long_cutoff_mm,
+    )
+    valid_overlap = np.isfinite(g_cap) & np.isfinite(g_ref)
+    elevation_corr = float(np.corrcoef(g_cap[valid_overlap], g_ref[valid_overlap])[0, 1]) if np.any(valid_overlap) else 0.0
+    print(f"Synchronized Spatial Pearson Correlation: {elevation_corr:+.4f} across {np.sum(valid_overlap):,} cells")
+
+    # 8. Dual ASTM WK92969 Roughness Analysis
     print("Running dual ASTM WK92969 analysis on both identical patches...")
     cfg = RoughnessConfig(grid_mm=grid_mm, short_cutoff_mm=short_cutoff_mm, long_cutoff_mm=long_cutoff_mm)
 
@@ -412,6 +493,7 @@ def verify_samples(
     print("-" * 70)
     print(f"Metrology Agreement: {pct_agreement:.1f}%")
     print(f"Surface Deviation:   Mean={dev_stats.mean_um:+.1f} um, RMS={dev_stats.rms_um:.1f} um, Std={dev_stats.std_um:.1f} um")
+    print(f"Spatial Correlation: {elevation_corr:+.3f} across {np.sum(valid_overlap):,} shared cells")
     print("-" * 70)
     print("Variogram Bins (Evaluation Length 0.5 to 5.0 mm):")
     for b_idx in range(len(res_cap.variogram_bins_um)):
@@ -446,6 +528,7 @@ def verify_samples(
         "delta": {
             "svr_um": float(delta_svr),
             "agreement_pct": float(pct_agreement),
+            "height_correlation": float(elevation_corr),
             "deviation_mean_um": float(dev_stats.mean_um),
             "deviation_rms_um": float(dev_stats.rms_um),
             "deviation_std_um": float(dev_stats.std_um),
@@ -458,7 +541,10 @@ def verify_samples(
         save_ply_binary(od / "captured_aligned.ply", cap_full)
         save_ply_binary(od / "reference_cropped.ply", ref_cropped)
         (od / "verification_report.json").write_text(json.dumps(summary_dict, indent=2))
-        generate_verification_plot(res_cap, res_ref, dev_stats, od / "verification_comparison.png")
+        generate_verification_plot(
+            res_cap, res_ref, dev_stats, od / "verification_comparison.png",
+            g_cap=g_cap, g_ref=g_ref, elevation_corr=elevation_corr,
+        )
         print(f"Exported aligned point clouds, JSON, and comparison plot to: {od}")
 
     return summary_dict
