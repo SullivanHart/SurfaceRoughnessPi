@@ -39,7 +39,7 @@ def parse_args():
     parser.add_argument("--period", type=int, default=16, help="Fringe period in projector pixels")
     parser.add_argument("--num-phases", type=int, default=8, help="Number of phase shift patterns (default: 8)")
     parser.add_argument("--gray-bits", type=int, default=5, help="Number of coarse Gray-code bits (default: 5)")
-    parser.add_argument("--min-mod", type=float, default=3.0, help="Minimum phase modulation threshold")
+    parser.add_argument("--min-mod", type=float, default=2.0, help="Minimum phase modulation threshold")
     parser.add_argument("--min-contrast", type=float, default=5.0, help="Minimum white-black intensity contrast")
     parser.add_argument("--min-disparity", type=float, default=0.1, help="Minimum valid disparity in pixels")
     parser.add_argument("--max-disparity", type=float, default=2500.0, help="Maximum valid disparity in pixels")
@@ -156,7 +156,7 @@ def decode_camera_phase(images, num_phases, gray_bits, min_mod, min_contrast):
     # segment's median Gray-code cycle offset to anchor the absolute integer order.
     for y in range(H):
         valid_cols = np.where(valid_mask[y])[0]
-        if len(valid_cols) < 5:
+        if len(valid_cols) < 2:
             continue
 
         # Split into contiguous runs (gap <= 2 pixels)
@@ -165,7 +165,7 @@ def decode_camera_phase(images, num_phases, gray_bits, min_mod, min_contrast):
         segments = np.split(valid_cols, split_points)
 
         for seg in segments:
-            if len(seg) < 5:
+            if len(seg) < 2:
                 continue
             seg_wrapped = wrapped_phi[y, seg]
             seg_unwrapped = np.unwrap(seg_wrapped)
@@ -190,7 +190,7 @@ def subpixel_epipolar_phase_match(phi_l, mask_l, phi_r, mask_r, min_disp, max_di
     for y in range(H):
         idx_r = np.where(mask_r[y])[0]
         idx_l = np.where(mask_l[y])[0]
-        if len(idx_r) < 10 or len(idx_l) < 5:
+        if len(idx_r) < 2 or len(idx_l) < 1:
             continue
 
         phi_r_row = phi_r[y, idx_r]
@@ -205,7 +205,7 @@ def subpixel_epipolar_phase_match(phi_l, mask_l, phi_r, mask_r, min_disp, max_di
         _, unique_idx = np.unique(phi_r_sorted, return_index=True)
         phi_r_sorted = phi_r_sorted[unique_idx]
         x_r_sorted = x_r_sorted[unique_idx]
-        if len(phi_r_sorted) < 5:
+        if len(phi_r_sorted) < 2:
             continue
 
         # Target phases in Left row
@@ -268,16 +268,57 @@ def subpixel_epipolar_phase_match(phi_l, mask_l, phi_r, mask_r, min_disp, max_di
     return disparity
 
 
+def hole_aware_median(disparity: np.ndarray, mask: np.ndarray, k: int = 3) -> np.ndarray:
+    """
+    Computes local median disparity strictly over valid neighbor pixels.
+    - Does NOT pull boundary pixels toward zero.
+    - Does NOT inpaint or fill in missing points (holes remain strictly NaN).
+    - Preserves true voids and edges without boundary erosion.
+    """
+    if k <= 1 or not np.any(mask):
+        out = disparity.copy()
+        out[~mask] = np.nan
+        return out
+
+    if k % 2 == 0:
+        k += 1
+    rad = k // 2
+    H, W = disparity.shape
+
+    padded_d = np.pad(disparity, rad, mode="constant", constant_values=np.nan)
+    padded_m = np.pad(mask, rad, mode="constant", constant_values=False)
+
+    n_neighbors = k * k
+    stack_d = np.empty((H, W, n_neighbors), dtype=np.float32)
+    stack_m = np.empty((H, W, n_neighbors), dtype=bool)
+
+    idx = 0
+    for dy in range(k):
+        for dx in range(k):
+            stack_d[:, :, idx] = padded_d[dy : dy + H, dx : dx + W]
+            stack_m[:, :, idx] = padded_m[dy : dy + H, dx : dx + W]
+            idx += 1
+
+    stack_d[~stack_m] = np.nan
+    with np.errstate(all="ignore"):
+        med = np.nanmedian(stack_d, axis=-1).astype(np.float32)
+
+    # Strictly preserve voids: non-masked pixels remain NaN
+    med[~mask] = np.nan
+    return med
+
+
 def filter_disparity_mask(mask, disparity, median_filter, max_median_diff, min_component_area):
     filtered = mask.copy()
 
     if median_filter and median_filter >= 3:
-        if median_filter % 2 == 0:
-            median_filter += 1
-        safe = np.where(filtered, disparity, 0).astype(np.float32)
-        local_median = cv2.medianBlur(safe, median_filter)
-        valid_median = np.abs(local_median) > 0
-        filtered &= ~(valid_median & (np.abs(disparity - local_median) > max_median_diff))
+        # Hole-aware median outlier filter:
+        # Uses only valid neighbor pixels to compute local median.
+        # This prevents hole boundaries and shadow edges from being eroded or corrupted by 0 padding.
+        local_med = hole_aware_median(disparity, filtered, k=median_filter)
+        diff = np.abs(disparity - local_med)
+        is_outlier = np.isfinite(diff) & (diff > max_median_diff)
+        filtered &= ~is_outlier
 
     if min_component_area > 1:
         kernel = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (5, 5))
@@ -294,31 +335,69 @@ def filter_disparity_mask(mask, disparity, median_filter, max_median_diff, min_c
 def smooth_disparity_edge_preserving(
     disparity: np.ndarray,
     valid_mask: np.ndarray,
-    method: str = "bilateral",
-    d: int = 5,
-    sigma_color: float = 0.25,
+    method: str = "median",
+    d: int = 3,
+    sigma_color: float = 0.30,
     sigma_space: float = 1.5,
 ) -> np.ndarray:
     """
-    Applies edge-preserving smoothing to continuous sub-pixel disparity.
+    Applies hole-aware edge-preserving smoothing to continuous sub-pixel disparity.
     Significantly lowers high-frequency point noise floor (Laplacian MAD)
-    while strictly preserving true physical surface topography and sharp steps.
+    while strictly preserving true physical surface topography, holes, and voids.
+    Does NOT hallucinate or fill in missing points.
     """
     if method == "none" or d <= 1 or not np.any(valid_mask):
         return disparity
 
-    clean = np.where(valid_mask, disparity, 0.0).astype(np.float32)
-    if method == "bilateral":
-        smoothed = cv2.bilateralFilter(clean, d, sigma_color, sigma_space)
-    elif method == "median":
+    if method == "median":
         k = d if d % 2 == 1 else d + 1
-        smoothed = cv2.medianBlur(clean, k)
-    else:
-        return disparity
+        smoothed = hole_aware_median(disparity, valid_mask, k=k)
+        out = disparity.copy()
+        out[valid_mask] = smoothed[valid_mask]
+        out[~valid_mask] = np.nan
+        return out
 
-    out = disparity.copy()
-    out[valid_mask] = smoothed[valid_mask]
-    return out
+    elif method == "bilateral":
+        # Normalized hole-aware bilateral filter
+        # Computes photometric and spatial weights only over valid pixels
+        k = d if d % 2 == 1 else d + 1
+        rad = k // 2
+        H, W = disparity.shape
+
+        padded_d = np.pad(disparity, rad, mode="constant", constant_values=np.nan)
+        padded_m = np.pad(valid_mask, rad, mode="constant", constant_values=False)
+
+        y_grid, x_grid = np.ogrid[-rad : rad + 1, -rad : rad + 1]
+        spatial_w = np.exp(-(x_grid**2 + y_grid**2) / (2.0 * sigma_space**2)).astype(np.float32)
+
+        numerator = np.zeros((H, W), dtype=np.float32)
+        denominator = np.zeros((H, W), dtype=np.float32)
+        center_d = disparity
+
+        for dy in range(k):
+            for dx in range(k):
+                sw = spatial_w[dy, dx]
+                nbr_d = padded_d[dy : dy + H, dx : dx + W]
+                nbr_m = padded_m[dy : dy + H, dx : dx + W]
+
+                diff = nbr_d - center_d
+                with np.errstate(all="ignore"):
+                    rw = np.exp(-(diff**2) / (2.0 * sigma_color**2))
+                    w = np.where(nbr_m & valid_mask, sw * rw, 0.0).astype(np.float32)
+                    w_d = w * np.nan_to_num(nbr_d, nan=0.0)
+
+                numerator += w_d
+                denominator += w
+
+        with np.errstate(all="ignore"):
+            smoothed = np.where(denominator > 1e-6, numerator / denominator, center_d)
+
+        out = disparity.copy()
+        out[valid_mask] = smoothed[valid_mask]
+        out[~valid_mask] = np.nan
+        return out
+
+    return disparity
 
 
 def robust_plane_filter_mask(points, threshold_mm):

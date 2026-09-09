@@ -30,7 +30,9 @@ def project_path(value):
 
 parser = argparse.ArgumentParser()
 parser.add_argument("--brightness", type=int, default=60, metavar="0-255")
-parser.add_argument("--exposure", type=int, default=450, metavar="US")
+parser.add_argument("--exposure", type=int, default=550, metavar="US")
+parser.add_argument("--min-mod", type=float, default=2.0,
+                    help="Minimum phase modulation threshold for phase reconstruction (default: 2.0)")
 parser.add_argument("--proj-pattern-ms", type=int, default=150,
                     help="Projector display exposure per pattern in milliseconds (default: 150ms -> 2.9s scan)")
 parser.add_argument("--patterns", type=int, default=40, help="Number of scan patterns to capture")
@@ -527,6 +529,8 @@ def run_postprocess():
             str(args.phase_steps),
             "--gray-bits",
             str(args.gray_bits),
+            "--min-mod",
+            str(args.min_mod),
             "--min-disparity",
             str(args.min_disparity),
             "--plane-filter-mm",
