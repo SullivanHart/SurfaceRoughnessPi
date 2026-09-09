@@ -279,8 +279,11 @@ def generate_verification_plot(
 ) -> None:
     """Generate a high-resolution 4-panel visual verification summary plot."""
     try:
+        import matplotlib
+        matplotlib.use("Agg")
         import matplotlib.pyplot as plt
-    except ImportError:
+    except Exception as e:
+        print(f"Warning: Could not import matplotlib ({e}); skipping verification plot.")
         return
 
     fig, axes = plt.subplots(2, 2, figsize=(14, 10), dpi=150)
@@ -541,10 +544,21 @@ def verify_samples(
         save_ply_binary(od / "captured_aligned.ply", cap_full)
         save_ply_binary(od / "reference_cropped.ply", ref_cropped)
         (od / "verification_report.json").write_text(json.dumps(summary_dict, indent=2))
+        plot_path = od / "verification_comparison.png"
         generate_verification_plot(
-            res_cap, res_ref, dev_stats, od / "verification_comparison.png",
+            res_cap, res_ref, dev_stats, plot_path,
             g_cap=g_cap, g_ref=g_ref, elevation_corr=elevation_corr,
         )
+        if plot_path.exists():
+            print(f"Saved verification plot: {plot_path}")
+            # Also copy to top-level output/ directory if od is an output/ subdirectory
+            if od.parent.name == "output":
+                import shutil
+                try:
+                    shutil.copyfile(plot_path, od.parent / "verification_comparison.png")
+                    print(f"Also copied plot to: {od.parent / 'verification_comparison.png'}")
+                except Exception:
+                    pass
         print(f"Exported aligned point clouds, JSON, and comparison plot to: {od}")
 
     return summary_dict

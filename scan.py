@@ -78,6 +78,8 @@ parser.add_argument("--render-preview", action="store_true",
 parser.add_argument("--preview-out", default="output/pointclouds/latest_preview.png",
                     help="Path to write live 2D preview image if --render-preview is enabled")
 parser.add_argument("--no-zero-disparity-rectify", action="store_true")
+parser.add_argument("--verify", nargs="?", const="A4", default=None,
+                    help="Automatically run verification comparison against reference SCRATA sample (e.g. A1, A2, A3, A4; default: A4 if flag provided without value)")
 parser.add_argument("--no-postprocess", action="store_true",
                     help="Only capture images; skip reconstruction and roughness analysis")
 parser.add_argument("--roughness-grid-mm", type=float, default=0.20)
@@ -634,6 +636,19 @@ def run_postprocess():
                 run_command("Generating live preview image", render_cmd)
         except Exception as e:
             print(f"Warning: could not generate roughness visual overlay / preview: {e}")
+
+    if args.verify:
+        try:
+            send_status("VERIFYING")
+            verify_cmd = [
+                sys.executable,
+                str(TOOLS_DIR / "metrology" / "verify_scan.py"),
+                str(project_path(args.recon_out)),
+                str(args.verify),
+            ]
+            run_command(f"Running metrology verification against reference {args.verify}", verify_cmd)
+        except Exception as e:
+            print(f"Warning: verification comparison failed: {e}")
 
 
 def detect_checkerboard(gray):
