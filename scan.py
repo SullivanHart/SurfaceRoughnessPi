@@ -43,7 +43,8 @@ parser.add_argument("--flash-proj-height", type=int, default=570,
                     help="Effective projector height used when generating the flashed pattern set")
 parser.add_argument("--white-thresh", type=int, default=1)
 parser.add_argument("--black-thresh", type=int, default=1)
-parser.add_argument("--min-disparity", type=float, default=1.0)
+parser.add_argument("--min-disparity", type=float, default=0.1)
+parser.add_argument("--max-disparity", type=float, default=2500.0)
 parser.add_argument("--min-component-area", type=int, default=1000,
                     help="Reject connected mask components smaller than this (0 disables)")
 parser.add_argument("--median-filter", type=int, default=5,

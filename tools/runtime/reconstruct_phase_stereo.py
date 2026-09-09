@@ -41,8 +41,8 @@ def parse_args():
     parser.add_argument("--gray-bits", type=int, default=5, help="Number of coarse Gray-code bits (default: 5)")
     parser.add_argument("--min-mod", type=float, default=3.0, help="Minimum phase modulation threshold")
     parser.add_argument("--min-contrast", type=float, default=5.0, help="Minimum white-black intensity contrast")
-    parser.add_argument("--min-disparity", type=float, default=1.0, help="Minimum valid disparity in pixels")
-    parser.add_argument("--max-disparity", type=float, default=600.0, help="Maximum valid disparity in pixels")
+    parser.add_argument("--min-disparity", type=float, default=0.1, help="Minimum valid disparity in pixels")
+    parser.add_argument("--max-disparity", type=float, default=2500.0, help="Maximum valid disparity in pixels")
     parser.add_argument("--disparity-sign", choices=("auto", "positive", "negative", "both"), default="auto",
                         help="Disparity sign selection (default: auto)")
     parser.add_argument("--min-depth", type=float, default=50.0, help="Minimum valid Z depth in mm")
@@ -218,12 +218,23 @@ def subpixel_epipolar_phase_match(phi_l, mask_l, phi_r, mask_r, min_disp, max_di
 
     # Disparity Sign Analysis
     valid_raw = np.isfinite(raw_disparity)
+    raw_vals = raw_disparity[valid_raw]
+
+    if len(raw_vals) == 0:
+        print("No raw disparity matches found along scanlines.")
+        return np.full((H, W), np.nan, dtype=np.float32)
+
+    p1, p5, p50, p95, p99 = np.percentile(raw_vals, [1, 5, 50, 95, 99])
+    print(f"Raw disparity matches: {len(raw_vals):,} px")
+    print(f"Raw disparity min/max: [{float(np.min(raw_vals)):.2f}, {float(np.max(raw_vals)):.2f}] px")
+    print(f"Raw disparity percentiles (1, 5, 50, 95, 99): [{p1:.1f}, {p5:.1f}, {p50:.1f}, {p95:.1f}, {p99:.1f}] px")
+
     pos_mask = valid_raw & (raw_disparity >= min_disp) & (raw_disparity <= max_disp)
     neg_mask = valid_raw & (raw_disparity <= -min_disp) & (raw_disparity >= -max_disp)
     pos_count = int(pos_mask.sum())
     neg_count = int(neg_mask.sum())
 
-    print(f"Raw disparity matches: {int(valid_raw.sum()):,} (Positive: {pos_count:,}, Negative: {neg_count:,})")
+    print(f"Window [±{min_disp:g}, ±{max_disp:g}] px: Positive = {pos_count:,}, Negative = {neg_count:,}")
 
     if disp_sign == "auto":
         if neg_count > pos_count * 1.5:
