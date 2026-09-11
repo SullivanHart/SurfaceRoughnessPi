@@ -176,7 +176,8 @@ def decode_camera_phase(images, num_phases, gray_bits, min_mod, min_contrast):
             abs_phase[y, seg] = seg_unwrapped + offset_cycle * 2.0 * np.pi
 
     abs_phase[~valid_mask] = np.nan
-    return abs_phase, valid_mask, modulation, white_img
+    sat_mask = (max_phase_val >= 254)
+    return abs_phase, valid_mask, modulation, white_img, sat_mask
 
 
 def subpixel_epipolar_phase_match(phi_l, mask_l, phi_r, mask_r, min_disp, max_disp, disp_sign="auto"):
@@ -502,19 +503,28 @@ def main():
 
     # Decode continuous phase
     print("Decoding Left camera continuous unwrapped phase...")
-    phi_l, mask_l, mod_l, white_l = decode_camera_phase(
+    phi_l, mask_l, mod_l, white_l, sat_l = decode_camera_phase(
         left_rect, num_phases, gray_bits, args.min_mod, args.min_contrast
     )
     print("Decoding Right camera continuous unwrapped phase...")
-    phi_r, mask_r, mod_r, white_r = decode_camera_phase(
+    phi_r, mask_r, mod_r, white_r, sat_r = decode_camera_phase(
         right_rect, num_phases, gray_bits, args.min_mod, args.min_contrast
     )
 
     valid_l_pct = float(mask_l.mean() * 100)
     valid_r_pct = float(mask_r.mean() * 100)
+    sat_l_pct = float(sat_l.mean() * 100)
+    sat_r_pct = float(sat_r.mean() * 100)
     med_mod_l = float(np.median(mod_l[mask_l])) if mask_l.any() else 0.0
     med_mod_r = float(np.median(mod_r[mask_r])) if mask_r.any() else 0.0
     print(f"Decoded pixels: Left = {valid_l_pct:.1f}% (median mod {med_mod_l:.1f}), Right = {valid_r_pct:.1f}% (median mod {med_mod_r:.1f})")
+
+    if max(sat_l_pct, sat_r_pct) > 5.0:
+        print(f"  [WARNING] Sensor saturation detected: Left={sat_l_pct:.1f}% saturated (>=254), Right={sat_r_pct:.1f}%.")
+        print("            Bright diffuse surfaces (e.g. white walls/paper) saturate under high exposure.")
+        print("            Remedy: Reduce exposure (e.g. --exposure 250) or brightness (e.g. --brightness 34).")
+    elif min(valid_l_pct, valid_r_pct) < 10.0:
+        print("  [WARNING] Low decoded pixel yield (<10%). Check camera focus, working distance (~195mm), or raise exposure.")
 
     # Sub-pixel epipolar matching
     print("Computing sub-pixel horizontal disparity map...")
